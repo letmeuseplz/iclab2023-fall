@@ -1,310 +1,282 @@
 `timescale 1ns/1ps
-
-`define CYCLE_TIME 12 // cycle
-`define PAT_NUM 17     // adjust to your number of patterns
+`define CYCLE_TIME 12
+`define PAT_NUM    20   // 可依需要修改
 
 module PATTERN(
-    // Input Port (to pattern)
-    clk,
-    rst_n,
-    in_valid,
-    Img,
-    Kernel,
-    Weight,
-    Opt,
+    // ---- Inputs TO DUT ----
+    output reg        clk,
+    output reg        rst_n,
+    output reg        in_valid,
+    output reg [31:0] Img,
+    output reg [31:0] Kernel,
+    output reg [31:0] Weight,
+    output reg [1:0]  Opt,
 
-    // Output Port (from DUT)
-    out_valid,
-    out
+    // ---- Outputs FROM DUT ----
+    input             out_valid,
+    input      [31:0] out
 );
 
-/* === IO direction (pattern drives DUT inputs) === */
-output reg         clk, rst_n, in_valid;
-output reg [31:0]  Img;
-output reg [31:0]  Kernel;
-output reg [31:0]  Weight;
-output reg [1:0]   Opt;
-
-input              out_valid;
-input  [31:0]      out;
-
-/* === clock === */
+// =========================================================
+// CLOCK
+// =========================================================
 real CYCLE = `CYCLE_TIME;
 always #(CYCLE/2.0) clk = ~clk;
 
-/* === file handles & variables === */
-integer f_img, f_ker, f_w, f_opt;
-integer f_gold_out, f_gold_cnt;
-integer i_pat, i;
-integer latency;
-integer total_latency;
-integer timeout_limit;
-integer patnum;
-initial patnum = `PAT_NUM;
 
+// =========================================================
+// MEMORY DECLARATIONS
+// =========================================================
+reg [31:0] mem_img  [0:(`PAT_NUM*96)-1];
+reg [31:0] mem_ker  [0:(`PAT_NUM*27)-1];
+reg [31:0] mem_w    [0:(`PAT_NUM*4)-1];
+reg  [1:0] mem_opt  [0:`PAT_NUM-1];
+reg [31:0] mem_gold_out [0:20000]; // 足夠大
+integer    mem_gold_cnt [0:`PAT_NUM-1];
+
+
+// =========================================================
+// GENERAL VARIABLES
+// =========================================================
+integer pat_i;
+integer latency, total_latency;
 integer base_img, base_ker, base_w, base_gold;
-integer idx;
+integer delay_rand;
+real golden_real, out_real, error_rate;
 
-integer img_total, ker_total, w_total, gold_total;
 
-reg [31:0] mem_img  [0: (`PAT_NUM*96) - 1];  // PAT_NUM * 96 images per pattern
-reg [31:0] mem_ker  [0: (`PAT_NUM*27) - 1];  // PAT_NUM * 27 kernels per pattern
-reg [31:0] mem_w    [0: (`PAT_NUM*4)  - 1];  // PAT_NUM * 4 weights per pattern
-reg [1:0]  mem_opt  [0: (`PAT_NUM) - 1];
-reg [31:0] mem_gold_out [0: 10000];          // generous size for all golden outputs concatenated
-integer    mem_gold_cnt [0: (`PAT_NUM)-1];   // how many out values expected for each pattern
-
-/* Protect overlap: same style as your original PATTERN */
+// =========================================================
+// PROTECT: out_valid cannot overlap with in_valid
+// =========================================================
 always @(*) begin
-    if (in_valid && out_valid) begin
+    if(in_valid && out_valid) begin
         $display("************************************************************");
-        $display("                          FAIL!                             ");
-        $display("*  The out_valid cannot overlap with in_valid   *");
+        $display("                           FAIL!                             ");
+        $display("* out_valid cannot overlap with in_valid (spec #8)          *");
         $display("************************************************************");
         $finish;
     end
 end
 
-/* === read mem files at start ===
-   Expect files:
-     - img.mem : hex words, total PAT_NUM*96 entries (each 32-bit hex)
-     - ker.mem : hex words, total PAT_NUM*27 entries
-     - w.mem   : hex words, total PAT_NUM*4 entries
-     - opt.mem : hex words (2-bit values), PAT_NUM entries
-     - golden_out.mem : hex words (32-bit expected out values) concatenated across patterns
-     - golden_cnt.mem : decimal counts of expected outputs per pattern (PAT_NUM lines)
-*/
+
+// =========================================================
+// INITIAL
+// =========================================================
 initial begin
-    // Attempt to load memories; will fail if missing
-    $display("Load memory files ...");
-    $readmemh("img.mem", mem_img);
-    $readmemh("ker.mem", mem_ker);
-    $readmemh("w.mem",   mem_w);
-    $readmemh("opt.mem", mem_opt);
+    // Load patterns
+    $readmemh("img.mem"       , mem_img);
+    $readmemh("ker.mem"       , mem_ker);
+    $readmemh("w.mem"         , mem_w);
+    $readmemh("opt.mem"       , mem_opt);
     $readmemh("golden_out.mem", mem_gold_out);
-    // golden counts need decimal read with $fscanf below, but also can be stored via readmem if hex; we use a file open:
-    f_gold_cnt = $fopen("golden_cnt.mem", "r");
-    if (f_gold_cnt == 0) begin
-        $display("************************************************************");
-        $display(" FAIL! Cannot open golden_cnt.mem file");
-        $display("************************************************************");
+
+    integer fcnt, tmp;
+    fcnt = $fopen("golden_cnt.mem", "r");
+    if(fcnt == 0) begin
+        $display("FAIL! Cannot open golden_cnt.mem");
         $finish;
     end
-    for (i = 0; i < patnum; i = i + 1) begin
-        $fscanf(f_gold_cnt, "%d\n", mem_gold_cnt[i]);
-    end
-    $fclose(f_gold_cnt);
-
-    // initialize
-    reset_task();
-
-    $display("------------------------------------------------------------");
-    $display("            START SNN PATTERN RUN (TOTAL PATTERN = %0d)    ", patnum);
-    $display("------------------------------------------------------------");
+    for(tmp = 0; tmp < `PAT_NUM; tmp = tmp + 1)
+        $fscanf(fcnt, "%d\n", mem_gold_cnt[tmp]);
+    $fclose(fcnt);
 
     total_latency = 0;
-    base_img = 0; base_ker = 0; base_w = 0; base_gold = 0;
+    base_img  = 0;
+    base_ker  = 0;
+    base_w    = 0;
+    base_gold = 0;
 
-    // main loop over patterns
-    for (i_pat = 0; i_pat < patnum; i_pat = i_pat + 1) begin
-        // send inputs for pattern i_pat
-        input_task(i_pat, base_img, base_ker, base_w, base_gold);
-        wait_out_valid_task();
-        check_ans_task(i_pat, base_gold);
+    reset_task;
 
-        $display("\033[0;34mPASS PATTERN NO.%4d,\033[m \033[0;32mexecution cycle : %3d\033[m", i_pat, latency);
+    $display("-------------------------------------------------------------");
+    $display("                START SNN PATTERNS (TOTAL = %0d)            ", `PAT_NUM);
+    $display("-------------------------------------------------------------");
 
-        // advance bases
-        base_img  = base_img + 96;
-        base_ker  = base_ker + 27;
-        base_w    = base_w   + 4;
-        base_gold = base_gold + mem_gold_cnt[i_pat];
+    // RUN ALL PATTERNS
+    for(pat_i = 0; pat_i < `PAT_NUM; pat_i = pat_i + 1) begin
+        send_inputs(pat_i, base_img, base_ker, base_w);
+        wait_out_valid;
+        check_output(pat_i, base_gold);
+
+        total_latency += latency;
+
+        base_img  += 96;
+        base_ker  += 27;
+        base_w    += 4;
+        base_gold += mem_gold_cnt[pat_i];
+
+        $display("\033[0;34mPASS PATTERN %0d,\033[m Latency = %0d cycles", pat_i, latency);
     end
 
-    YOU_PASS_task();
-    #(`CYCLE_TIME * 100.0) $finish;
+    final_pass;
+    #100 $finish;
 end
 
-/* === reset task === */
+
+// =========================================================
+// RESET TASK (Spec #3 #4 #5)
+// =========================================================
 task reset_task; begin
-    rst_n = 1'b1;
-    in_valid = 1'b0;
-    Img = 32'bx;
-    Kernel = 32'bx;
-    Weight = 32'bx;
-    Opt = 2'bx;
+    clk = 0;
+    rst_n = 1;
+    in_valid = 0;
+    Img = 'bx;
+    Kernel = 'bx;
+    Weight = 'bx;
+    Opt = 'bx;
+
     force clk = 0;
-    #CYCLE; rst_n = 0;
-    #CYCLE; rst_n = 1;
-    // check outputs are zero after reset (spec)
-    if (out_valid !== 1'b0 || out !== 32'b0) begin
+    #(CYCLE) rst_n = 0;   // assert reset
+    #(CYCLE) rst_n = 1;   // release reset
+
+    if(out_valid !== 0 || out !== 0) begin
         $display("************************************************************");
-        $display("                          FAIL!                             ");
-        $display("*  Output signal should be 0 after initial RESET  at %8t   *",$time);
+        $display("                           FAIL!                             ");
+        $display("* Output not zero after reset release (spec #4)             *");
         $display("************************************************************");
-        repeat(2) #CYCLE;
         $finish;
     end
-    #CYCLE; release clk;
+
+    #(CYCLE);
+    release clk;
 end endtask
 
-/* === input_task ===
-   For pattern i_pat we will:
-    - at first in_valid cycle drive Opt = mem_opt[i_pat] (sent only on first in_valid cycle)
-    - send 96 Img from mem_img[base_img ... base_img+95]
-    - then send 27 Kernel
-    - then send 4 Weight
-    After finishing, drive in_valid = 0 and inputs = X
-*/
-task input_task;
-input integer pat_index, img_base, ker_base, w_base, gold_base;
-integer t, k;
-integer idx_img, idx_ker, idx_w;
+
+
+// =========================================================
+// SEND INPUTS TASK (Spec #1 #2 #3 #4 #5)
+// - Opt only valid in first in_valid cycle
+// - Img 96 cycles
+// - Kernel 27 cycles
+// - Weight 4 cycles
+// - all changes on negedge clk
+// =========================================================
+task send_inputs;
+input integer pat_idx;
+input integer img_base, ker_base, w_base;
+integer k;
 begin
-    // random delay between patterns to mimic original style
-    t = $urandom_range(1, 4);
-    repeat(t) @(negedge clk);
+    delay_rand = $urandom_range(1,4);
+    repeat(delay_rand) @(negedge clk);
 
-    // begin sending: on first negedge we set in_valid high and present Opt (one cycle)
-    in_valid = 1'b1;
-    Opt = mem_opt[pat_index];
+    in_valid = 1;
+    Opt = mem_opt[pat_idx];
 
-    // First cycle - provide first Img (we follow sending protocol: Opt is valid during first cycle of in_valid)
-    idx_img = img_base;
-    Img = mem_img[idx_img];
-    Kernel = 32'bx;
-    Weight = 32'bx;
+    // ---- Send 96 IMG ----
+    for(k=0; k<96; k=k+1) begin
+        @(negedge clk);
+        Img    = mem_img[img_base + k];
+        Kernel = 'bx;
+        Weight = 'bx;
+        if(k > 0) Opt = 'bx; // Opt only legal at first cycle
+    end
+
+    // ---- Send 27 Kernel ----
+    for(k=0; k<27; k=k+1) begin
+        @(negedge clk);
+        Img    = 'bx;
+        Kernel = mem_ker[ker_base + k];
+        Weight = 'bx;
+    end
+
+    // ---- Send 4 Weight ----
+    for(k=0; k<4; k=k+1) begin
+        @(negedge clk);
+        Img    = 'bx;
+        Kernel = 'bx;
+        Weight = mem_w[w_base + k];
+    end
+
+    // ---- Finish ----
     @(negedge clk);
+    in_valid = 0;
+    Img = 'bx; Kernel = 'bx; Weight = 'bx; Opt = 'bx;
+end endtask
 
-    // Continue send remaining 95 Img (we already sent one)
-    for (k = 1; k < 96; k = k + 1) begin
-        idx_img = img_base + k;
-        Img = mem_img[idx_img];
-        Kernel = 32'bx;
-        Weight = 32'bx;
-        Opt = 2'bx; // Opt only valid on first cycle
-        @(negedge clk);
-    end
 
-    // send 27 kernel cycles
-    for (k = 0; k < 27; k = k + 1) begin
-        idx_ker = ker_base + k;
-        Img = 32'bx;
-        Kernel = mem_ker[idx_ker];
-        Weight = 32'bx;
-        @(negedge clk);
-    end
 
-    // send 4 weight cycles
-    for (k = 0; k < 4; k = k + 1) begin
-        idx_w = w_base + k;
-        Img = 32'bx;
-        Kernel = 32'bx;
-        Weight = mem_w[idx_w];
-        @(negedge clk);
-    end
-
-    // finish input
-    in_valid = 1'b0;
-    Img = 32'bx; Kernel = 32'bx; Weight = 32'bx; Opt = 2'bx;
-    @(negedge clk);
-end
-endtask
-
-/* === wait_out_valid_task ===
-   Wait for out_valid to become 1 (with timeout). Count latency in cycles (negedge steps).
-   Use latency limit = 1000 (lab spec).
-*/
-task wait_out_valid_task; begin
+// =========================================================
+// WAIT OUTPUT (Spec #6 latency <= 1000)
+// =========================================================
+task wait_out_valid; begin
     latency = 0;
-    timeout_limit = 1000;
-    while (out_valid !== 1'b1) begin
+
+    while(out_valid !== 1) begin
+        @(negedge clk);
         latency = latency + 1;
-        if (latency > timeout_limit) begin
-            $display("********************************************************");
-            $display("                          FAIL!                         ");
-            $display("*  The execution latency are over %0d cycles  at %8t  *", timeout_limit, $time);
-            $display("********************************************************");
-            repeat(2) @(negedge clk);
+        if(latency > 1000) begin
+            $display("************************************************************");
+            $display("                           FAIL!                             ");
+            $display("* Latency > 1000 cycles (spec #6)                           *");
+            $display("************************************************************");
             $finish;
         end
-        @(negedge clk);
     end
-    total_latency = total_latency + latency;
 end endtask
 
-/* === check_ans_task ===
-   Compare each out (while out_valid is high) against mem_gold_out starting at base.
-   mem_gold_cnt[pat_index] gives expected number of output words for this pattern.
-   Currently uses exact 32-bit match. If you want floating-point tolerance compare,
-   I can convert to real via $bitstoreal and compare with epsilon (e.g., 0.002 relative).
-*/
-task check_ans_task;
-input integer pat_index, base_gold;
-integer expect_cnt;
+
+
+// =========================================================
+// CHECK OUTPUT (Spec: float error < 0.002)
+// =========================================================
+task check_output;
+input integer pat_idx;
+input integer base_gold;
 integer cnt;
-integer gidx;
-reg [31:0] expect;
+reg [31:0] gold_bin;
 begin
-    expect_cnt = mem_gold_cnt[pat_index];
     cnt = 0;
-    gidx = base_gold;
-    while (out_valid === 1'b1) begin
-        if (cnt >= expect_cnt) begin
-            $display("----------------------------------------------------------------");
-            $display("                         FAIL!                                   ");
-            $display("   Received more outputs than golden expects for pattern %0d      ", pat_index);
-            $display("----------------------------------------------------------------");
-            repeat(5) @(negedge clk);
-            $finish;
-        end
-        expect = mem_gold_out[gidx + cnt];
-        if (out !== expect) begin
+
+    while(out_valid === 1) begin
+        gold_bin = mem_gold_out[base_gold + cnt];
+
+        // FLOAT compare
+        golden_real = $bitstoreal(gold_bin);
+        out_real    = $bitstoreal(out);
+        error_rate  = (golden_real - out_real);
+        if(golden_real != 0) error_rate = error_rate / golden_real;
+        if(error_rate < 0) error_rate = -error_rate;
+
+        if(error_rate > 0.002) begin
             $display("----------------------------------------------------------------");
             $display("                             FAIL!                               ");
-            $display("   Pattern %0d: Golden out (hex) = %h, Your out (hex) = %h       ", pat_index, expect, out);
+            $display(" Pattern %0d: Floating error exceeded 0.002                     ", pat_idx);
+            $display(" Golden = %e  (hex=%h)", golden_real, gold_bin);
+            $display("   Your = %e  (hex=%h)", out_real, out);
+            $display(" Error = %e", error_rate);
             $display("----------------------------------------------------------------");
-            repeat(9) @(negedge clk);
             $finish;
         end
+
         cnt = cnt + 1;
         @(negedge clk);
     end
 
-    if (cnt !== expect_cnt) begin
-        $display("----------------------------------------------------------------");
-        $display("                             FAIL!                               ");
-        $display("   Pattern %0d: golden count = %0d, your count = %0d            ", pat_index, expect_cnt, cnt);
-        $display("----------------------------------------------------------------");
-        repeat(9) @(negedge clk);
+    if(cnt !== mem_gold_cnt[pat_idx]) begin
+        $display("************************************************************");
+        $display("                           FAIL!                             ");
+        $display("* Output count mismatch on pattern %0d                       *", pat_idx);
+        $display(" Golden count = %0d", mem_gold_cnt[pat_idx]);
+        $display(" Your   count = %0d", cnt);
+        $display("************************************************************");
         $finish;
     end
-end
-endtask
-
-/* === YOU_PASS_task === */
-task YOU_PASS_task; begin
-    $display("----------------------------------------------------------------------------------------------------------------------");
-    $display("                                                  Congratulations!                                                     ");
-    $display("                                           You have passed all patterns!                                              ");
-    $display("                                           Your execution cycles = %5d cycles                                        ", total_latency);
-    $display("                                           Your clock period = %.1f ns                                              ", CYCLE);
-    $display("                                           Total Latency (ns) = %.1f ns                                              ", total_latency * CYCLE);
-    $display("----------------------------------------------------------------------------------------------------------------------");
-    repeat(2) @(negedge clk);
-    $finish;
 end endtask
 
-endmodule
 
-// NOTE: Related files to prepare in working dir:
-//   img.mem          : hex 32-bit words, total PAT_NUM * 96 lines
-//   ker.mem          : hex 32-bit words, total PAT_NUM * 27 lines
-//   w.mem            : hex 32-bit words, total PAT_NUM * 4 lines
-//   opt.mem          : hex 2-bit values, PAT_NUM lines (e.g., 0,1,2,3 as hex)
-//   golden_out.mem   : hex 32-bit words concatenated all patterns' expected out in order
-//   golden_cnt.mem   : decimal lines, PAT_NUM lines where each line = expected output count for that pattern
-//
-// If you prefer different file layout (one file per pattern or ascii floats), tell me and我會幫你改。
-//
-// Reference PDF (uploaded): /mnt/data/Lab04_Exercise_v2.pdf
+
+// =========================================================
+// FINAL PASS
+// =========================================================
+task final_pass; begin
+    $display("======================================================================");
+    $display("                         CONGRATULATIONS!                             ");
+    $display("                   All SNN patterns PASSED!!!                         ");
+    $display(" Total execution cycles = %0d cycles", total_latency);
+    $display(" Clock period = %0.1f ns", CYCLE);
+    $display(" Total latency (ns) = %0.1f", total_latency * CYCLE);
+    $display("======================================================================");
+end endtask
+
+
+endmodule
