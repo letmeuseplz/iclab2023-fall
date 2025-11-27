@@ -29,7 +29,7 @@ module SNN #(
     localparam IMG_BUF_SZ    = IMG_MEM_SZ * 2;       // 96 (two images)
     localparam KERNEL_SZ     = 9 * CH;               // 27
     localparam FEAT_SZ       = CELLS_PER_IMG * 2;    // 32 (two images)
-    localparam PEND_DEPTH    = PIPE_LAT + 4;
+   
 
     // -------------------------
     // FSM states (top-level simplified)
@@ -48,7 +48,7 @@ module SNN #(
     // Inputs reception
     // -------------------------
     reg [6:0] recv_count; // 0..95 global count of Img inputs received
-    reg [15:0] in_cnt;
+  
     reg [6:0] ker_ptr;
     reg [1:0] wt_ptr;
     reg        ker_loaded;
@@ -70,64 +70,122 @@ module SNN #(
     // win & ker registers (registered by sequential)
     reg [DATA_W-1:0] win_pix_reg [0:8];
     reg [DATA_W-1:0] ker_reg [0:8];
-    reg ker_reg_valid;
 
-    // combinational next values (from combinational window generator)
-    reg [DATA_W-1:0] win_pix_next [0:8];
-    reg [DATA_W-1:0] ker_next     [0:8];
-    reg ker_valid_next;
 
-    // mult drive arrays (combinational outputs to DW mult)
-    reg [DATA_W-1:0] mult_a [0:8];
-    reg [DATA_W-1:0] mult_b [0:8];
-
-    // outputs of multipliers and adder tree (combinational)
-    wire [DATA_W-1:0] prod [0:8];
-    wire [DATA_W-1:0] a01,a23,a45,a67,a0123,a4567,tmp_all,sum_ch;
 
     // feature accumulator (final conv outputs sit here)
     reg [DATA_W-1:0] feat_acc [0:FEAT_SZ-1]; // 32 entries (img0:0..15, img1:16..31)
 
-    // done masking to track per-pixel completion (per image)
-    reg [CELLS_PER_IMG-1:0] done_mask0;
-    reg [CELLS_PER_IMG-1:0] done_mask1;
-    reg [1:0] proc_img_cnt; // 0..2
-
     // local variables for loops
     integer i, p;
 
-    reg [0:0] fc_round;      // 0 or 1
-    reg       fc_done;       // 該輪完成旗標
+    reg  fc_round;      // 0 or 1
+    reg  fc_done;       // 該輪完成旗標
+    reg  actv_done;
+    reg  sum_ch;
 
+    
+reg [DATA_W-1:0] feat_buf [0:31];   // 一維存兩張圖
+reg [DATA_W-1:0] max_top[0:3];
+reg [DATA_W-1:0] max_bot[0:3];
+reg [DATA_W-1:0] pooled[0:7];
+reg [2:0]         pool_stage;
+reg [3:0]         idx_ul, idx_ur, idx_dl, idx_dr;
+reg               pool_done;
+reg               pool_round;      // 0: 第一張, 1: 第二張
+wire              pool_all_done;
+wire [4:0] pool_base = pool_round ? 5'd16 : 5'd0;
+reg [DATA_W-1:0] mult_a_reg [0:8];
+reg [DATA_W-1:0] mult_b_reg [0:8];
+reg [DATA_W-1:0] a01_reg, a23_reg, a45_reg, a67_reg;
+reg [7:0]flatten[0:7];
+reg [3:0] fc_cnt;
 
+integer k;
+reg  gflag1, gflag0;
+reg idx_hist[0:7];
+reg img_hist[0:7];
+assign gflag_all = gflag0 & gflag1;
+reg cnt_img0,cnt_img1;
+reg [1:0] ch_hist [0:PIPE_LAT-1];
+integer m;
 
+reg [3:0] norm_s;
+reg [1:0] norm_img_idx;
+reg [3:0] elem_idx;
+reg [DATA_W-1:0] max_01, min_01, max_23, min_23;
+reg [DATA_W-1:0] global_max, global_min;
+reg [DATA_W-1:0] denom_reg;
+reg [DATA_W-1:0] sub_reg;
+reg norm_done;
 
+reg  [DATA_W-1:0] shared_sub_a, shared_sub_b;
+wire [DATA_W-1:0] shared_sub_z;
 
+reg  [DATA_W-1:0] shared_div_a, shared_div_b;
+wire [DATA_W-1:0] shared_div_z;
 
+reg [DATA_W-1:0] cmp_a0_r, cmp_b0_r, cmp_a1_r, cmp_b1_r;
 
-always @(*) begin
+reg local_add_out;
+reg [2:0] actv_s;
+reg [3:0] actv_idx;
+
+reg [DATA_W-1:0] actv_tmp1;
+reg [DATA_W-1:0] exp_x_reg;
+reg [DATA_W-1:0] inv_exp_reg;
+reg [DATA_W-1:0] add_out_reg;
+reg [DATA_W-1:0] sub_out_reg;
+
+reg local_add_a;
+reg local_add_b;
+reg [2:0] l1_stage;
+reg [2:0] l1_idx;
+reg [DATA_W-1:0] l1_abs [0:3];
+reg [DATA_W-1:0] acc;
+
+// shared_sub / shared_add
+reg  [DATA_W-1:0] sub_in_a, sub_in_b;
+wire [DATA_W-1:0] sub_out;
+wire [DATA_W-1:0] abs_out;
+reg  [DATA_W-1:0] add_a, add_b;
+wire [DATA_W-1:0] add_out;
+
+    // 產生 control flags（readable）
+wire do_div = (elem_idx > 0);
+wire do_sub = (elem_idx < NUM_ELEM_PER_IMG);
+wire is_last = (elem_idx == NUM_ELEM_PER_IMG);
+
+// comparator signals
+wire [DATA_W-1:0] cmp_a0, cmp_b0, cmp_a1, cmp_b1;
+wire cmp0_gt, cmp1_gt, cmp0_unord, cmp1_unord;
+    // -------------------------
+    // FSM MACHINE CONTROL
+    // -------------------------
+
+    always @(*) begin
     nstate = state;
-    case (state)
-        ST_IDLE: if (in_valid) nstate = ST_RUN;
+        case (state)
+            ST_IDLE: if (in_valid) nstate = ST_RUN;
 
-        ST_RUN:  if (&done_mask0 && &done_mask1) nstate = ST_POOL;
+            ST_RUN:  if (gflag_all) nstate = ST_POOL;
 
-        ST_POOL: nstate = ST_FC;
+            ST_POOL: if (pool_all_done) nstate = ST_FC;
 
-        ST_FC: begin
-            if (fc_done && fc_round == 0)
-                nstate = ST_FC;    // 再跑第二輪
-            else if (fc_done && fc_round == 1)
-                nstate = ST_NORM;  // 兩輪都結束才進 normalize
+            ST_FC: begin
+                if (fc_done && fc_round == 0)
+                    nstate = ST_FC;    // 再跑第二輪
+                else if (fc_done && fc_round == 1)
+                    nstate = ST_NORM;  // 兩輪都結束才進 normalize
+                end
+
+            ST_NORM: if (norm_done) nstate = ST_ACTV;
+            ST_ACTV: if (actv_done) nstate = ST_OUT;
+            ST_OUT:  if (out_valid) nstate = ST_IDLE;
+
+            default: nstate = ST_IDLE;
+        endcase
         end
-
-        ST_NORM: if (norm_done) nstate = ST_ACTV;
-        ST_ACTV: if (actv_done) nstate = ST_OUT;
-        ST_OUT:  if (out_valid) nstate = ST_IDLE;
-
-        default: nstate = ST_IDLE;
-    endcase
-end
 
 
     always @(posedge clk or negedge rst_n) begin
@@ -237,20 +295,21 @@ reg        win_pad_flag_next [0:8];
 reg [DATA_W-1:0] win_pad_val_next [0:8];
 integer center_r, center_c;
 integer rr, cc, r, c;
-integer p;
+integer p1;
+integer rr_cl, cc_cl;
 always @(*) begin
 
     // default
-    for (p=0; p<9; p=p+1) begin
+    for (p1=0; p1<9; p1=p1+1) begin
 
-        win_pad_val_next[p] = {DATA_W{1'b0}};
+        win_pad_val_next[p1] = {DATA_W{1'b0}};
     end
 
-    if (/* state==ST_RUN && recv_count >= 16 */) begin
+    if ( state==ST_RUN && recv_count >= 16 ) begin
         center_r = conv_pos[3:2];
         center_c = conv_pos[1:0];
-        for (p=0; p<9; p=p+1) begin
-            case (p)
+        for (p1=0; p1<9; p1=p1+1) begin
+            case (p1)
                 0: begin rr = -1; cc = -1; end
                 1: begin rr = -1; cc =  0; end
                 2: begin rr = -1; cc =  1; end
@@ -267,18 +326,17 @@ always @(*) begin
                 // out of bounds -> padding case
                 if (opt_reg[0] == 1'b1) begin
 
-                    win_addr_next[p] = 16'd0;
+                    win_addr_next[p1] = 16'd0;
                 end else begin
                     // replicate/clamp
-                    integer rr_cl, cc_cl;
                     rr_cl = (r < 0) ? 0 : ((r >= IMG_H) ? IMG_H-1 : r);
                     cc_cl = (c < 0) ? 0 : ((c >= IMG_W) ? IMG_W-1 : c);
 
-                    win_addr_next[p] = conv_img * IMG_MEM_SZ + conv_ch * CELLS_PER_IMG + rr_cl * IMG_W + cc_cl;
+                    win_addr_next[p1] = conv_img * IMG_MEM_SZ + conv_ch * CELLS_PER_IMG + rr_cl * IMG_W + cc_cl;
                 end
             end else begin
   
-                win_addr_next[p] = conv_img * IMG_MEM_SZ + conv_ch * CELLS_PER_IMG + r * IMG_W + c;
+                win_addr_next[p1] = conv_img * IMG_MEM_SZ + conv_ch * CELLS_PER_IMG + r * IMG_W + c;
             end
         end
     end
@@ -300,7 +358,7 @@ always @(posedge clk or negedge rst_n) begin
         end
 
     end else begin
-        if (prep_can_present) begin
+        if (recv_count>15) begin
             for (p=0; p<9; p=p+1) begin
                 win_addr_reg[p]     <= win_addr_next[p];
   
@@ -311,120 +369,106 @@ always @(posedge clk or negedge rst_n) begin
 end
 
 
-   // ==========================================================
-   // 控制邏輯 (FSM + iterators for convolution)
-   // ==========================================================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            conv_pos <= 0;
-            conv_ch  <= 0;
-            conv_img <= 0;
-            fire_shift <= {PIPE_LAT{1'b0}};
-            done_mask0 <= {CELLS_PER_IMG{1'b0}};
-            done_mask1 <= {CELLS_PER_IMG{1'b0}};
-            proc_img_cnt <= 0;
-        end else begin
-            case (state)
-                ST_IDLE: begin
-                    conv_pos <= 0;
-                    conv_ch  <= 0;
-                    conv_img <= 0;
-                    fire_shift <= {PIPE_LAT{1'b0}};
-                end
-
-                ST_RUN: begin
-                    // only run pipeline if we've received enough data OR there are pending things
-                    if (recv_count >= 16) begin
-                        // advance pipeline shift register
-                        fire_shift <= {fire_shift[PIPE_LAT-2:0], 1'b1};
-
-                        // conv iterators update
-                        if (conv_pos < CELLS_PER_IMG - 1) begin
-                            conv_pos <= conv_pos + 1;
-                        end else begin
-                            conv_pos <= 0;
-                            if (conv_ch < CH - 1) begin
-                                conv_ch <= conv_ch + 1;
-                            end else begin
-                                conv_ch <= 0;
-                                // move to second image processing only when we've received at least 48 pixels
-                                if (conv_img == 0 && recv_count >= IMG_MEM_SZ)
-                                    conv_img <= 1;
-                            end
-                        end
-                    end else begin
-                        fire_shift <= {PIPE_LAT{1'b0}};
-                    end
-                end
-
-                default: begin
-                    // leave iterators unchanged in other states
-                end
-            endcase
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        for (k = 0; k < PIPE_LAT; k = k + 1) begin
+            idx_hist[k]  <= 0;
+            img_hist[k]  <= 0;
+        
         end
-    end
+        for (i = 0; i < FEAT_SZ; i = i + 1) begin
+            feat_acc[i] <= {DATA_W{1'b0}};
+        end
 
-    // ==========================================================
-    // 資料管線 (window/kernel latch + hist pipeline + direct accumulate)
-    // ==========================================================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            for (i=0; i<PIPE_LAT; i=i+1) begin
-                pos_hist[i] <= 0;
-                ch_hist[i]  <= 0;
-                img_hist[i] <= 0;
-            end
-            for (i=0; i<9; i=i+1) begin
-                win_pix_reg[i] <= {DATA_W{1'b0}};
-                ker_reg[i]     <= {DATA_W{1'b0}};
-            end
-            ker_reg_valid <= 1'b0;
-            // clear feat_acc
-            for (i=0;i<FEAT_SZ;i=i+1) feat_acc[i] <= {DATA_W{1'b0}};
-            done_mask0 <= {CELLS_PER_IMG{1'b0}};
-            done_mask1 <= {CELLS_PER_IMG{1'b0}};
-            proc_img_cnt <= 0;
-        end else begin
-            if (state == ST_RUN && recv_count >= 16) begin
-                // shift history
-                for (i=PIPE_LAT-1; i>0; i=i-1) begin
-                    pos_hist[i] <= pos_hist[i-1];
-                    ch_hist[i]  <= ch_hist[i-1];
-                    img_hist[i] <= img_hist[i-1];
-                end
-                pos_hist[0] <= conv_pos;
-                ch_hist[0]  <= conv_ch;
-                img_hist[0] <= conv_img;
+        cnt_img0 <= 0;
+        cnt_img1 <= 0;
+        gflag0 <= 0;
+        gflag1 <= 0;
+    end else begin
+        // shift right
+        for (k = PIPE_LAT-1; k > 0; k = k - 1) begin
+            idx_hist[k]  <= idx_hist[k-1];
+            img_hist[k]  <= img_hist[k-1];
+           
+        end
+        // push current meta (注意：這裡要用 conv_img 而不是外部 image)
+        idx_hist[0]  <= conv_pos;
+        img_hist[0]  <= conv_img;
+    
 
-                // latch window & kernel into registers (these become stable for combinational DW)
-                for (i=0; i<9; i=i+1) begin
-                    win_pix_reg[i] <= win_pix_next[i];
-                    ker_reg[i]     <= ker_next[i];
-                end
-                ker_reg_valid <= ker_valid_next;
+        // when pipeline tail valid: accumulate
+        if (recv_count>19) begin
+           
+                feat_acc[idx_hist[PIPE_LAT-1] + (img_hist[PIPE_LAT-1] << 4)] <= feat_acc[idx_hist[PIPE_LAT-1] + (img_hist[PIPE_LAT-1] << 4)] + sum_ch;
             end
 
-            // when the adder-tree/combinational sum_ch aligns (fire_shift tail), directly accumulate
-            if (fire_shift[PIPE_LAT-1]) begin
-                integer hist_idx;
-                hist_idx = img_hist[PIPE_LAT-1] * CELLS_PER_IMG + pos_hist[PIPE_LAT-1];
-                // Direct accumulate: feat_acc[idx] <= feat_acc[idx] + sum_ch;
-                // Note: using non-blocking <= to avoid race in sequential block
-                feat_acc[ hist_idx ] <= feat_acc[ hist_idx ] + sum_ch;
-
-                // if last channel for this pos, mark done mask
-                if (ch_hist[PIPE_LAT-1] == (CH - 1)) begin
-                    if (img_hist[PIPE_LAT-1] == 0) done_mask0[ pos_hist[PIPE_LAT-1] ] <= 1'b1;
-                    else done_mask1[ pos_hist[PIPE_LAT-1] ] <= 1'b1;
-                end
-
-                // update proc_img_cnt when masks complete
-                if (&done_mask0) proc_img_cnt <= (proc_img_cnt < 1) ? 1 : proc_img_cnt;
-                if (&done_mask1) proc_img_cnt <= 2;
+            // optional counters (debug) — still safe, but prefer done_mask for completion
+            if (img_hist[PIPE_LAT-1] == 1'b0) begin
+                if (cnt_img0 < 48) cnt_img0 <= cnt_img0 + 1;
+            end else begin
+                if (cnt_img1 < 48) cnt_img1 <= cnt_img1 + 1;
             end
         end
+
+        if (cnt_img0 == 48) gflag0 <= 1;
+        if (cnt_img1 == 48) gflag1 <= 1;
     end
 
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        conv_ch  <= 0;    // 0 ~ 2
+        conv_pos <= 0;    // 0 ~ 15
+        conv_img <= 0;    // 0 ~ 1
+    end else begin
+
+        if (recv_count > 15) begin
+
+            //------------------------------------
+            // New iteration order (channel-major)
+            // ch → pos → img
+            //------------------------------------
+
+            // 1. position runs fastest (0..15)
+            if (conv_pos == 15) begin
+                conv_pos <= 0;
+
+                // 2. after finishing 16 pos → go to next channel
+                if (conv_ch == 2) begin
+                    conv_ch <= 0;
+
+                    // 3. after 3 channels → go to next image
+                    if (conv_img == 1)
+                        conv_img <= 0;
+                    else
+                        conv_img <= conv_img + 1;
+
+                end 
+                else begin
+                    conv_ch <= conv_ch + 1;
+                end
+
+            end 
+            else begin
+                conv_pos <= conv_pos + 1;
+            end
+
+        end
+    end
+end
+
+
+
+
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        for (m = 0; m < PIPE_LAT; m = m + 1) 
+            ch_hist[m] <= 0;
+    end else begin
+        ch_hist[0] <= conv_ch;
+        for (m = 1; m < PIPE_LAT; m = m + 1) 
+            ch_hist[m] <= ch_hist[m-1];
+    end
+end  
 
 
 
@@ -432,10 +476,25 @@ end
 
 
 
+assign cmp_a0_w =
+    (state == ST_NORM) ? cmp_a0_r :
+    (pool_stage < 3'd4) ? feat_buf[pool_base + idx_ul] :
+                          max_top[pool_stage - 3'd4];
 
+assign cmp_b0_w =
+    (state == ST_NORM) ? cmp_b0_r :
+    (pool_stage < 3'd4) ? feat_buf[pool_base + idx_ur] :
+                          max_bot[pool_stage - 3'd4];
 
+assign cmp_a1_w =
+    (state == ST_NORM) ? cmp_a1_r :
+    (pool_stage < 3'd4) ? feat_buf[pool_base + idx_dl] :
+                          {DATA_W{1'b0}};
 
-//10/16  目前假定pool~l1都沒大問題  但max pool那邊有cmp共用問題待解決   conv部分  前面兩個cycle也就是到padding取值假定沒問題  最後要完成的部分是寫入feature map的控制 必須是三通道
+assign cmp_b1_w =
+    (state == ST_NORM) ? cmp_b1_r :
+    (pool_stage < 3'd4) ? feat_buf[pool_base + idx_dr] :
+                          {DATA_W{1'b0}};
 
 
 
@@ -453,37 +512,29 @@ end
 // feat_buf[16:31] = image 1
 // =============================================================
 
-reg [DATA_W-1:0] feat_buf [0:31];   // 一維存兩張圖
-reg [DATA_W-1:0] max_top[0:3];
-reg [DATA_W-1:0] max_bot[0:3];
-reg [DATA_W-1:0] pooled[0:3];
-reg [2:0]         pool_stage;
-reg [3:0]         idx_ul, idx_ur, idx_dl, idx_dr;
-reg               pool_done;
-reg               pool_round;      // 0: 第一張, 1: 第二張
-wire              pool_all_done;
 
-// comparator signals
-wire [DATA_W-1:0] cmp_a0, cmp_b0, cmp_a1, cmp_b1;
-wire cmp0_gt, cmp1_gt, cmp0_unord, cmp1_unord;
-
-// =============================================================
-//  Comparator instances (2 total)
-// =============================================================
 DW_fp_cmp #(SIG_W, EXP_W) cmp_upper (
-    .a(cmp_a0), .b(cmp_b0),
-    .agtb(cmp0_gt), .unordered(cmp0_unord),
-    .aeqb(), .altb()
-);
-DW_fp_cmp #(SIG_W, EXP_W) cmp_lower (
-    .a(cmp_a1), .b(cmp_b1),
-    .agtb(cmp1_gt), .unordered(cmp1_unord),
-    .aeqb(), .altb()
+    .a(cmp_a0_w),
+    .b(cmp_b0_w),
+    .agtb(cmp0_gt),
+    .unordered(cmp0_unord),
+    .aeqb(),
+    .altb()
 );
 
-// =============================================================
-// Index selection (0~15 per image)
-// =============================================================
+DW_fp_cmp #(SIG_W, EXP_W) cmp_lower (
+    .a(cmp_a1_w),
+    .b(cmp_b1_w),
+    .agtb(cmp1_gt),
+    .unordered(cmp1_unord),
+    .aeqb(),
+    .altb()
+);
+
+//-----------------------------------------------------
+// POOL INPUT ROUTING (pure combinational)
+//-----------------------------------------------------
+
 always @(*) begin
     case (pool_stage)
         3'd0: begin idx_ul = 0;  idx_ur = 1;  idx_dl = 4;  idx_dr = 5; end
@@ -494,30 +545,20 @@ always @(*) begin
     endcase
 end
 
-// =============================================================
-// Dynamic comparator input routing
-// (offset = pool_round * 16)
-// =============================================================
-wire [4:0] base = pool_round ? 5'd16 : 5'd0;
-
-assign cmp_a0 = (pool_stage < 3'd4) ? feat_buf[base + idx_ul] : max_top[pool_stage - 3'd4];
-assign cmp_b0 = (pool_stage < 3'd4) ? feat_buf[base + idx_ur] : max_bot[pool_stage - 3'd4];
-assign cmp_a1 = (pool_stage < 3'd4) ? feat_buf[base + idx_dl] : {DATA_W{1'b0}};
-assign cmp_b1 = (pool_stage < 3'd4) ? feat_buf[base + idx_dr] : {DATA_W{1'b0}};
 
 // =============================================================
 // Pool FSM
 // =============================================================
-integer i;
+integer ii;
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
         pool_stage <= 3'd0;
         pool_round <= 1'b0;
         pool_done  <= 1'b0;
-        for (i = 0; i < 4; i = i + 1) begin
-            max_top[i] <= 0;
-            max_bot[i] <= 0;
-            pooled[i]  <= 0;
+        for (ii = 0; ii < 4; ii = ii + 1) begin
+            max_top[ii] <= 0;
+            max_bot[ii] <= 0;
+            pooled[ii]  <= 0;
         end
     end 
     else if (state == ST_POOL) begin
@@ -564,9 +605,6 @@ assign pool_all_done = pool_done;
 //-----------------------------------------------------
 // multiplier input registers (打一拍對齊 BRAM)
 //-----------------------------------------------------
-reg [DATA_W-1:0] mult_a_reg [0:8];
-reg [DATA_W-1:0] mult_b_reg [0:8];
-
 
 //-----------------------------------------------------
 // MULT inputs (共用 FC / CONV)
@@ -582,7 +620,7 @@ always @(posedge clk or negedge rst_n) begin
             // -----------------------------
             // 卷積層
             // -----------------------------
-            ST_CONV: begin
+            ST_RUN: begin
                 for (p=0; p<9; p=p+1) begin
                     mult_a_reg[p] <= img_buf[win_addr_reg[p]];
                     mult_b_reg[p] <= ker_reg[p];
@@ -613,7 +651,7 @@ always @(posedge clk or negedge rst_n) begin
                     mult_a_reg[6] <= pooled[6];
                     mult_a_reg[7] <= pooled[7];
                 end
-                mult_a_reg[8] <= 0;
+                    mult_a_reg[8] <= 0;
 
                 // 共用同一組 FC 權重
                 mult_b_reg[0] <= weight_buf[0];
@@ -634,7 +672,7 @@ end
 //-----------------------------------------------------
 // FC outputs pipeline
 //-----------------------------------------------------
-reg [DATA_W-1:0] a01_reg, a23_reg, a45_reg, a67_reg;
+
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
         a01_reg <= 0;
@@ -648,7 +686,6 @@ always @(posedge clk or negedge rst_n) begin
         a67_reg <= a67;
     end
 end
-
 
 //-----------------------------------------------------
 // Flatten output buffer (合併兩輪 FC 結果)
@@ -728,13 +765,9 @@ end
 //-----------------------------------------------------
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) sum_ch <= 0;
-    else if (state == ST_CONV)
+    else if (state == ST_RUN)
         sum_ch <= sum_reg;  // CONV 最終加總結果
 end
-
-
-
-
 
 
 
@@ -753,7 +786,7 @@ end
 DW_fp_sub #(sig_width, exp_width, ieee_compliance)
           U1 ( .a(shared_sub_a), .b(shared_sub_b), .rnd(inst_rnd), .z(shared_sub_z), .status(status_inst) );
 
-DW_fp_div #(sig_width, exp_width, ieee_compliance, faithful_round, en_ubr_flag) U1
+DW_fp_div #(sig_width, exp_width, ieee_compliance, faithful_round, en_ubr_flag) U8
           ( .a(shared_div_a), .b(shared_div_b), .rnd(inst_rnd), .z(shared_div_z), .status(status_inst)
           );
 localparam NUM_ELEM_PER_IMG = 4;
@@ -769,24 +802,6 @@ localparam NORM_S_SET01    = 4'd0,
            NORM_S_PIPE     = 4'd6,
            NORM_S_DONE     = 4'd7;
 
-reg [3:0] norm_s;
-reg [1:0] norm_img_idx;
-reg [3:0] elem_idx;
-reg [DATA_W-1:0] max_01, min_01, max_23, min_23;
-reg [DATA_W-1:0] global_max, global_min;
-reg [DATA_W-1:0] denom_reg;
-reg [DATA_W-1:0] sub_reg;
-reg norm_done;
-
-reg  [DATA_W-1:0] shared_sub_a, shared_sub_b;
-wire [DATA_W-1:0] shared_sub_z;
-
-reg  [DATA_W-1:0] shared_div_a, shared_div_b;
-wire [DATA_W-1:0] shared_div_z;
-    // 產生 control flags（readable）
-    wire do_div = (elem_idx > 0);
-    wire do_sub = (elem_idx < NUM_ELEM_PER_IMG);
-    wire is_last = (elem_idx == NUM_ELEM_PER_IMG);
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
         norm_s      <= NORM_S_SET01;
@@ -798,33 +813,47 @@ always @(posedge clk or negedge rst_n) begin
         denom_reg <= {DATA_W{1'b0}};
         sub_reg <= {DATA_W{1'b0}};
         norm_done <= 1'b0;
-    end else if (state == ST_NORM) begin
+    end
+    else if (state == ST_NORM) begin
         case (norm_s)
+
             NORM_S_SET01: begin
                 norm_done <= 1'b0;
-                cmp_a0 <= flatten[norm_img_idx*4 + 0];
-                cmp_b0 <= flatten[norm_img_idx*4 + 1];
-                cmp_a1 <= flatten[norm_img_idx*4 + 2];
-                cmp_b1 <= flatten[norm_img_idx*4 + 3];
-                norm_s <= NORM_S_WAIT01;
+
+                // load first 4 data
+                cmp_a0_r <= flatten[norm_img_idx*4 + 0];
+                cmp_b0_r <= flatten[norm_img_idx*4 + 1];
+                cmp_a1_r <= flatten[norm_img_idx*4 + 2];
+                cmp_b1_r <= flatten[norm_img_idx*4 + 3];
+
+                norm_s   <= NORM_S_WAIT01;
             end
+
             NORM_S_WAIT01: begin
-                max_01 <= (cmp0_gt) ? cmp_a0 : cmp_b0;
-                min_01 <= (cmp0_gt) ? cmp_b0 : cmp_a0;
-                max_23 <= (cmp1_gt) ? cmp_a1 : cmp_b1;
-                min_23 <= (cmp1_gt) ? cmp_b1 : cmp_a1;
-                norm_s <= NORM_S_PREP23;
+                // results from DW comparator available now
+                max_01 <= cmp0_unord ? cmp_a0_w : (cmp0_gt ? cmp_a0_w : cmp_b0_w);
+                min_01 <= cmp0_unord ? cmp_b0_w : (cmp0_gt ? cmp_b0_w : cmp_a0_w);
+                max_23 <= cmp1_unord ? cmp_a1_w : (cmp1_gt ? cmp_a1_w : cmp_b1_w);
+                min_23 <= cmp1_unord ? cmp_b1_w : (cmp1_gt ? cmp_b1_w : cmp_a1_w);
+
+                // prepare 2nd-stage compare
+                cmp_a0_r <= max_01;
+                cmp_b0_r <= max_23;
+                cmp_a1_r <= min_01;
+                cmp_b1_r <= min_23;
+
+                norm_s <= NORM_S_WAIT23;
             end
             NORM_S_PREP23: begin
-                cmp_a0 <= max_01;
-                cmp_b0 <= max_23;
-                cmp_a1 <= min_01;
-                cmp_b1 <= min_23;
+                cmp_a0_r <= max_01;
+                cmp_b0_r <= max_23;
+                cmp_a1_r <= min_01;
+                cmp_b1_r <= min_23;
                 norm_s <= NORM_S_WAIT23;
             end
             NORM_S_WAIT23: begin
-                global_max <= (cmp0_gt) ? cmp_a0 : cmp_b0;
-                global_min <= (cmp1_gt) ? cmp_b1 : cmp_a1;
+                global_max <= (cmp0_gt) ? cmp_a0_w : cmp_b0_w;
+                global_min <= (cmp1_gt) ? cmp_b1_w : cmp_a1_w;
                 norm_s <= NORM_S_DENOM_SUB;
             end
             NORM_S_DENOM_SUB: begin
@@ -907,18 +936,8 @@ localparam ACTV_S_IDLE        = 3'd0,
            ACTV_S_FINAL_PREP  = 3'd5,
            ACTV_S_DONE        = 3'd6;
 
-reg [2:0] actv_s;
-reg [3:0] actv_idx;
 
-reg [DATA_W-1:0] actv_tmp1;
-reg [DATA_W-1:0] exp_x_reg;
-reg [DATA_W-1:0] inv_exp_reg;
-reg [DATA_W-1:0] add_out_reg;
-reg [DATA_W-1:0] sub_out_reg;
-
-
-
-DW_fp_exp #(inst_sig_width, inst_exp_width, inst_ieee_compliance, inst_arch) U1 (
+DW_fp_exp #(inst_sig_width, inst_exp_width, inst_ieee_compliance, inst_arch) U9 (
               .a(actv_tmp1),
               .z(exp_x),
               .status(status_inst) );
@@ -1006,17 +1025,6 @@ end
 // =========================================================
 // L1 distance stage (after activation)
 // =========================================================
-reg [2:0] l1_stage;
-reg [2:0] l1_idx;
-reg [DATA_W-1:0] l1_abs [0:3];
-reg [DATA_W-1:0] acc;
-
-// shared_sub / shared_add
-reg  [DATA_W-1:0] sub_in_a, sub_in_b;
-wire [DATA_W-1:0] sub_out;
-wire [DATA_W-1:0] abs_out;
-reg  [DATA_W-1:0] add_a, add_b;
-wire [DATA_W-1:0] add_out;
 
 // ============================================
 // 絕對值（浮點格式 → 清 sign bit）
