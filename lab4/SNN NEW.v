@@ -70,10 +70,7 @@ module SNN #(
     reg [1:0] conv_ch;    // 0..2
     reg       conv_img;   // 0..1
 
-  
-    // win & ker registers (registered by sequential)
-    reg [DATA_W-1:0] win_pix_reg [0:8];
-    reg [DATA_W-1:0] ker_reg [0:8];
+
 
 
 
@@ -123,7 +120,7 @@ module SNN #(
 
     reg [DATA_W-1:0] mult_a_reg [0:8];
     reg [DATA_W-1:0] mult_b_reg [0:8];
-    reg  [DATA_W-1:0] shared_sub_a, shared_sub_b;
+    
     wire [DATA_W-1:0] shared_sub_z;
 
     reg  [DATA_W-1:0] shared_div_a, shared_div_b;
@@ -158,6 +155,7 @@ module SNN #(
     reg [DATA_W-1:0] exp_x_reg;
     reg [DATA_W-1:0] inv_exp_reg;
     reg [DATA_W-1:0] add_out_reg;
+    reg [DATA_W-1:0] add_out_reg2;
     reg [DATA_W-1:0] sub_out_reg;
 
     reg local_add_a;
@@ -169,10 +167,11 @@ module SNN #(
 
     // shared_sub / shared_add
     reg  [DATA_W-1:0] sub_in_a, sub_in_b;
+    reg [DATA_W-1:0] sub_in_al1, sub_in_bl1;
     wire [DATA_W-1:0] sub_out;
     wire [DATA_W-1:0] abs_out;
     reg  [DATA_W-1:0] add_a, add_b;
-    wire [DATA_W-1:0] add_out;
+  
 
         // 產生 control flags（readable）
     wire do_div = (elem_idx > 0 && elem_idx <= NUM_ELEM_PER_IMG);
@@ -195,10 +194,10 @@ module SNN #(
             ST_POOL: if (pool_done) nstate = ST_FC;
 
             ST_FC: begin
-                if (fc_done && fc_round == 0)
-                    nstate = ST_FC;    // 再跑第二輪
-                else if (fc_done && fc_round == 1)
-                    nstate = ST_NORM;  // 兩輪都結束才進 normalize
+                 if (fc_done && fc_round == 1)
+                    nstate = ST_NORM;    // 兩輪都結束才進 normalize
+                else
+                    nstate = ST_FC;
                 end
 
             ST_NORM: if (norm_done) nstate = ST_ACTV;
@@ -224,7 +223,6 @@ module SNN #(
             recv_count <= 0;
             ker_ptr <= 0;
             wt_ptr <= 0;
-    
             opt_reg <= 2'b00;
             // clear img_buf & kernel & weight
             for (i=0; i<IMG_BUF_SZ; i=i+1) img_buf[i] <= {DATA_W{1'b0}};
@@ -244,8 +242,7 @@ module SNN #(
                 // kernel loading (first 27 cycles)
                 if (ker_ptr < KERNEL_SZ) begin
                     ker_buf[ker_ptr] <= Kernel;
-                    if (ker_ptr == KERNEL_SZ - 1) 
-
+          
                     ker_ptr <= ker_ptr + 1;
                 end
 
@@ -308,16 +305,14 @@ module SNN #(
         // else: hold previous values (do nothing)
     end
 
-
     reg [DATA_W-1:0] act_a1, act_b1, act_a2, act_b2;
-
 
     assign add02_a = (state == ST_ACTV) ? act_a2 : prod_reg[2];
     assign add02_b = (state == ST_ACTV) ? act_b2 : prod_reg[3];
-    assign add01_a =(state == ST_ACTV) ? act_a1 :prod_reg[0];
-    assign add01_b =(state == ST_ACTV) ? act_b1 :prod_reg[1];
+    assign add01_a =(state == ST_ACTV) ? act_a1 : prod_reg[0];
+    assign add01_b =(state == ST_ACTV) ? act_b1 : prod_reg[1];
     assign add03_a =(state == ST_OUT) ? add_a : prod_reg[4];
-
+    assign add03_b =(state == ST_OUT) ? add_b : prod_reg[5];
 
 
     //-----------------------------------------------------
@@ -327,7 +322,7 @@ module SNN #(
 
     DW_fp_add #(SIG_W, EXP_W, 0) add01(.a(add01_a), .b(add01_b), .rnd(3'b000), .z(a01));
     DW_fp_add #(SIG_W, EXP_W, 0) add23(.a(add02_a), .b(add02_b), .rnd(3'b000), .z(a23));
-    DW_fp_add #(SIG_W, EXP_W, 0) add45(.a(add03_a), .b(prod_reg[5]), .rnd(3'b000), .z(a45));
+    DW_fp_add #(SIG_W, EXP_W, 0) add45(.a(add03_a), .b(add03_b), .rnd(3'b000), .z(a45));
     DW_fp_add #(SIG_W, EXP_W, 0) add67(.a(prod_reg[6]), .b(prod_reg[7]), .rnd(3'b000), .z(a67));
     DW_fp_add #(SIG_W, EXP_W, 0) add0123(.a(a01), .b(a23), .rnd(3'b000), .z(a0123));
     DW_fp_add #(SIG_W, EXP_W, 0) add4567(.a(a45), .b(a67), .rnd(3'b000), .z(a4567));
@@ -667,7 +662,7 @@ end
                         else
                             mult_a_reg[p] <= img_buf[win_addr_reg[p]];
 
-                        mult_b_reg[p] <= ker_reg[p + (ch_hist[PIPE_LAT-1] * 9)];
+                        mult_b_reg[p] <= ker_buf[p + (ch_hist[PIPE_LAT-1] * 9)];
                     end
                 end
 
@@ -871,8 +866,8 @@ end
                     norm_s <= NORM_S_DENOM_SUB;
                 end
                 NORM_S_DENOM_SUB: begin
-                    shared_sub_a <= global_max;
-                    shared_sub_b <= global_min;
+                    sub_in_a <= global_max;
+                    sub_in_b <= global_min;
                     norm_s <= NORM_S_WAIT_DEN;
                 end
                 NORM_S_WAIT_DEN: begin
@@ -895,13 +890,13 @@ end
 
                     // Subtraction: 這拍要算的 flatten[...] - global_min
                     if (do_sub) begin
-                        shared_sub_a <= flatten[norm_img_idx*NUM_ELEM_PER_IMG + elem_idx];
-                        shared_sub_b <= global_min;
+                        sub_in_a <= flatten[norm_img_idx*NUM_ELEM_PER_IMG + elem_idx];
+                        sub_in_b <= global_min;
                     end 
                     else begin
-                        shared_sub_a <= {DATA_W{1'b0}};
+                        sub_in_a <= {DATA_W{1'b0}};
 
-                        shared_sub_b <= {DATA_W{1'b0}};
+                        sub_in_b <= {DATA_W{1'b0}};
                     end
 
                     if (is_last) 
@@ -913,8 +908,7 @@ end
                     
                     if (do_store)
                         normalized[norm_img_idx*NUM_ELEM_PER_IMG + (elem_idx - 2)] <= shared_div_z;
-                    else 
-                        normalized[norm_img_idx*NUM_ELEM_PER_IMG ] <= {DATA_W{1'b0}};   
+  
                 end
                 NORM_S_DONE: begin
                         if (norm_img_idx == 0) begin
@@ -1016,6 +1010,7 @@ end
                         shared_div_a <= sub_out_reg;    // (exp - inv_exp)/(exp + inv_exp)
                         shared_div_b <= add_out_reg;
                     end
+                    actv_s      <= ACTV_S_DONE;
                 end
                 // -----------------------------
                 ACTV_S_DONE: begin
@@ -1047,8 +1042,8 @@ end
     assign abs_out = {1'b0, sub_out[DATA_W-2:0]};
 
 
-    assign shared_sub_a =(state == ST_OUT)?sub_in_a:0;
-    assign shared_sub_b = sub_in_b:0;
+    assign shared_sub_a =(state == ST_ACTV) ? sub_in_a : sub_in_al1;
+    assign shared_sub_b = (state == ST_ACTV) ? sub_in_b : sub_in_bl1;
    
     // ============================================
     // Sequential control (driven by top FSM)
@@ -1064,8 +1059,8 @@ end
         else if (state == ST_OUT) begin
             case (l1_stage)
                 3'd0: begin
-                    sub_in_a <= flatten[l1_idx];
-                    sub_in_b <= flatten[l1_idx + 4];
+                    sub_in_al1 <= flatten[l1_idx];
+                    sub_in_bl1 <= flatten[l1_idx + 4];
                     l1_stage <= 3'd1;
                 end
                 3'd1: begin
@@ -1083,17 +1078,17 @@ end
                     l1_stage <= 3'd3;
                 end
                 3'd3: begin
-                    add_a <= add_out;
+                    add_a <= a45;
                     add_b <= l1_abs[2];
                     l1_stage <= 3'd4;
                 end
                 3'd4: begin
-                    add_a <= add_out;
+                    add_a <= a45;
                     add_b <= l1_abs[3];
                     l1_stage <= 3'd5;
                 end
                 3'd5: begin
-                    out       <= add_out;
+                    out       <= a45;
                     out_valid <= 1'b1;
                     l1_stage  <= 3'd6;
                 end
