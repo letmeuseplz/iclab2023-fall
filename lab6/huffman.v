@@ -1,16 +1,12 @@
 `timescale 1ns/1ps
-
-// ============================================================
-// HT_TOP : Lab06 Huffman Top Design (FINAL DEMO-PASS VERSION)
-// - Strict Verilog-2001 compliant (NO SystemVerilog syntax)
-// - Deterministic FSM
-// - Cycle-accurate DFS stack
-// ============================================================
+// ============================================================================
+// Huffman Tree Top Module (merged + corrected DFS)
+// ============================================================================
 module HT_TOP #(
-    parameter IP_WIDTH = 8,          // A,B,C,E,I,L,O,V
+    parameter IP_WIDTH = 8,
     parameter W_W      = 5,
     parameter ID_W     = 4,
-    parameter MAX_NODE = 16
+    parameter MAX_NODE = 15
 )(
     input  wire            clk,
     input  wire            rst_n,
@@ -21,255 +17,338 @@ module HT_TOP #(
     output reg             out_code
 );
 
-// ============================================================
-// FSM state encoding
-// ============================================================
-localparam S_IDLE      = 4'd0;
-localparam S_IN        = 4'd1;
-localparam S_SORT      = 4'd2;
-localparam S_PICK      = 4'd3;
-localparam S_UPDATE    = 4'd4;
-localparam S_DFS_INIT  = 4'd5;
-localparam S_DFS_RUN   = 4'd6;
-localparam S_PREP_OUT  = 4'd7;
-localparam S_OUT       = 4'd8;
+// ============================================================================
+// FSM
+// ============================================================================
+localparam S_IDLE     = 4'd0,
+           S_IN       = 4'd1,
+           S_SORT     = 4'd2,
+           S_PICK     = 4'd3,
+           S_UPDATE   = 4'd4,
+           S_DFS_INIT = 4'd5,
+           S_DFS_RUN  = 4'd6,
+           S_PREP_OUT = 4'd7,
+           S_OUT      = 4'd8;
 
 reg [3:0] state, next_state;
 
-// ============================================================
-// Node storage
-// ============================================================
-reg [W_W-1:0]  node_w [0:MAX_NODE-1];
-reg            node_v [0:MAX_NODE-1];
-reg [ID_W-1:0] node_l [0:MAX_NODE-1];
-reg [ID_W-1:0] node_r [0:MAX_NODE-1];
+// ============================================================================
+// Huffman nodes
+// ============================================================================
+reg [W_W-1:0]  node_w     [0:MAX_NODE-1];
+reg            node_valid [0:MAX_NODE-1];
+reg [ID_W-1:0] node_l     [0:MAX_NODE-1];
+reg [ID_W-1:0] node_r     [0:MAX_NODE-1];
 
 reg [ID_W-1:0] next_node;
 reg [ID_W-1:0] active_cnt;
 
-// ============================================================
-// SORT IP interface
-// ============================================================
-reg  [IP_WIDTH*ID_W-1:0] si_char;
-reg  [IP_WIDTH*W_W-1:0]  si_weight;
-wire [IP_WIDTH*ID_W-1:0] so_char;
+wire dfs_done;
+assign dfs_done = (state == S_DFS_RUN) &&
+                  dfs_pop &&
+                  dfs_leaf &&
+                  (sp == 1);
 
-SORT_IP #(.IP_WIDTH(IP_WIDTH)) u_sort (
+// ============================================================================
+// SORT IP interface
+// ============================================================================
+reg  [MAX_NODE*ID_W-1:0] si_char;
+reg  [MAX_NODE*W_W-1:0]  si_weight;
+wire [MAX_NODE*ID_W-1:0] so_char;
+
+// SORT_IP assumed to exist and produce sorted character indices
+SORT_IP #(.IP_WIDTH(MAX_NODE)) u_sort (
     .IN_character (si_char),
     .IN_weight    (si_weight),
     .OUT_character(so_char)
 );
 
-// ============================================================
-// SORT input packing (Verilog-2001 compliant)
-// ============================================================
 integer i;
 always @(*) begin
-    for (i = 0; i < IP_WIDTH; i = i + 1) begin
-        si_char[
-            (IP_WIDTH-i)*ID_W-1 :
-            (IP_WIDTH-1-i)*ID_W
-        ] = i[ID_W-1:0];
-
-        si_weight[
-            (IP_WIDTH-i)*W_W-1 :
-            (IP_WIDTH-1-i)*W_W
-        ] = node_v[i] ? node_w[i] : {W_W{1'b1}};
+    for (i = 0; i < MAX_NODE; i = i + 1) begin
+        si_char[(MAX_NODE-1-i)*ID_W +: ID_W] = i[ID_W-1:0];
+        if (i < next_node && node_valid[i])
+            si_weight[(MAX_NODE-1-i)*W_W +: W_W] = node_w[i];
+        else
+            si_weight[(MAX_NODE-1-i)*W_W +: W_W] = {W_W{1'b1}};
     end
 end
 
-// ============================================================
-// FSM next-state logic
-// ============================================================
+// ============================================================================
+// FSM next state
+// ============================================================================
 always @(*) begin
     next_state = state;
     case (state)
-        S_IDLE     : if (in_valid)        next_state = S_IN;
-        S_IN       : if (!in_valid)       next_state = S_SORT;
-        S_SORT     :                      next_state = S_PICK;
-        S_PICK     :                      next_state = S_UPDATE;
-        S_UPDATE   : if (active_cnt > 1)  next_state = S_SORT;
-                     else                 next_state = S_DFS_INIT;
-        S_DFS_INIT :                      next_state = S_DFS_RUN;
-        S_DFS_RUN  : if (sp == 0)          next_state = S_PREP_OUT;
-        S_PREP_OUT :                      next_state = S_OUT;
-        S_OUT      : if (out_done)         next_state = S_IDLE;
-        default    :                      next_state = S_IDLE;
+        S_IDLE     : if (in_valid)       next_state = S_IN;
+        S_IN       : if (!in_valid)      next_state = S_SORT;
+        S_SORT     :                     next_state = S_PICK;
+        S_PICK     :                     next_state = S_UPDATE;
+        S_UPDATE   : if (active_cnt > 1) next_state = S_SORT;
+                     else                next_state = S_DFS_INIT;
+        S_DFS_INIT :                     next_state = S_DFS_RUN;
+        S_DFS_RUN  : if (dfs_done)         next_state = S_PREP_OUT;
+        S_PREP_OUT :                     next_state = S_OUT;
+        S_OUT      : if (out_done)        next_state = S_IDLE;
     endcase
 end
 
-always @(posedge clk or negedge rst_n) begin
+always @(posedge clk or negedge rst_n)
     if (!rst_n) state <= S_IDLE;
     else        state <= next_state;
-end
-
-// ============================================================
-// Input stage
-// ============================================================
+// ============================================================================
+// Input
+// ============================================================================
 reg [3:0] in_cnt;
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
         in_cnt <= 0;
+        next_node <= 0;
+        active_cnt <= 0;
         for (i = 0; i < MAX_NODE; i = i + 1) begin
-            node_v[i] <= 1'b0;
-            node_w[i] <= {W_W{1'b0}};
+            node_valid[i] <= 0;
+            node_w[i] <= 0;
+            node_l[i] <= {ID_W{1'b0}};
+            node_r[i] <= {ID_W{1'b0}};
         end
     end
-    else if (state == S_IN && in_valid) begin
+    else if (in_valid) begin
         node_w[in_cnt] <= in_weight;
-        node_v[in_cnt] <= 1'b1;
+        node_valid[in_cnt] <= 1'b1;
         in_cnt <= in_cnt + 1'b1;
     end
     else if (state == S_IDLE) begin
-        in_cnt     <= 0;
-        next_node  <= IP_WIDTH;
+        for (i = 0; i < MAX_NODE; i = i + 1) begin
+            node_valid[i] <= 0;
+            node_w[i] <= 0;
+            node_l[i] <= {ID_W{1'b0}};
+            node_r[i] <= {ID_W{1'b0}};
+        end
+        in_cnt <= 0;
+        next_node <= IP_WIDTH;
         active_cnt <= IP_WIDTH;
     end
 end
 
-// ============================================================
-// Pick smallest two nodes (Verilog-2001 slice)
-// ============================================================
+// ============================================================================
+// Pick smallest two
+// ============================================================================
 reg [ID_W-1:0] p0, p1;
-always @(posedge clk) begin
+always @(posedge clk)
     if (state == S_PICK) begin
-        p0 <= so_char[
-                IP_WIDTH*ID_W-1 :
-                IP_WIDTH*ID_W-ID_W
-              ];
-        p1 <= so_char[
-                IP_WIDTH*ID_W-ID_W-1 : 
-                IP_WIDTH*ID_W-2*ID_W
-              ];
+        p0 <= so_char[ID_W-1:0];
+        p1 <= so_char[2*ID_W-1:ID_W];
+    
     end
-end
-always @(posedge clk) begin
-    if (state == S_UPDATE) begin
-        // deactivate merged nodes
-        node_v[p0] <= 1'b0;
-        node_v[p1] <= 1'b0;
 
-        // activate new node
-        node_v[next_node] <= 1'b1;
+wire p0_is_left =
+    (node_w[p0] > node_w[p1]) ||
+    ((node_w[p0] == node_w[p1]) && (p0 < p1));
+
+// ============================================================================
+// Merge
+// ============================================================================
+always @(posedge clk)
+    if (state == S_UPDATE) begin
+        node_valid[p0] <= 1'b0;
+        node_valid[p1] <= 1'b0;
+
+        node_valid[next_node] <= 1'b1;
         node_w[next_node] <= node_w[p0] + node_w[p1];
 
-        // ------------------------------------------------
-        // left / right decision (weight first, then ID)
-        // ------------------------------------------------
-        if (node_w[p0] < node_w[p1]) begin
+        if (p0_is_left) begin
             node_l[next_node] <= p0;
             node_r[next_node] <= p1;
-        end
-        else if (node_w[p0] > node_w[p1]) begin
+        end else begin
             node_l[next_node] <= p1;
             node_r[next_node] <= p0;
         end
-        else begin
-            // tie-break: smaller ID on left
-            if (p0 < p1) begin
-                node_l[next_node] <= p0;
-                node_r[next_node] <= p1;
-            end
-            else begin
-                node_l[next_node] <= p1;
-                node_r[next_node] <= p0;
-            end
+        if(next_node < MAX_NODE) begin
+            next_node <= next_node + 1'b1;
         end
-
-        next_node  <= next_node + 1'b1;
         active_cnt <= active_cnt - 1'b1;
     end
-end
 
 
 // ============================================================
-// DFS stack (cycle-accurate)
+// DFS stack
 // ============================================================
-reg [ID_W-1:0] stack_node [0:MAX_NODE-1];
-reg [7:0]      stack_code [0:MAX_NODE-1];
+reg [ID_W-1:0] stack_node  [0:MAX_NODE-1];
+reg [7:0]      stack_code  [0:MAX_NODE-1];
+reg [3:0]      stack_depth [0:MAX_NODE-1];
 reg [3:0]      sp;
 
 reg [7:0] code_table [0:IP_WIDTH-1];
 reg [3:0] code_len   [0:IP_WIDTH-1];
 
+// ---------- DFS comb ----------
+reg [3:0]      sp_next;
+reg            dfs_pop;
+reg            dfs_push;
+reg            dfs_leaf;
+
+reg [ID_W-1:0] cur_node;
+reg [7:0]      cur_code;
+reg [3:0]      cur_depth;
+
+always @(*) begin
+    // defaults
+    dfs_pop  = 1'b0;
+    dfs_push = 1'b0;
+    dfs_leaf = 1'b0;
+
+    sp_next  = sp;
+
+    cur_node  = {ID_W{1'b0}};
+    cur_code  = 8'd0;
+    cur_depth = 4'd0;
+
+    if (state == S_DFS_RUN && sp != 0) begin
+        // pop
+        dfs_pop  = 1'b1;
+        cur_node  = stack_node[sp-1];
+        cur_code  = stack_code[sp-1];
+        cur_depth = stack_depth[sp-1];
+
+        if (cur_node < IP_WIDTH) begin
+            // leaf node
+            dfs_leaf = 1'b1;
+            sp_next  = sp - 1;          // pop only
+        end
+        else begin
+            // internal node
+            dfs_push = 1'b1;
+            sp_next  = sp - 1 + 2;      // pop + push two
+        end
+    end
+end
+
+// ---------- DFS seq ----------
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
         sp <= 0;
     end
     else if (state == S_DFS_INIT) begin
+        // push root
         sp <= 1;
-        stack_node[0] <= next_node - 1'b1;
-        stack_code[0] <= 8'b0;
+        stack_node[0]  <= next_node - 1;
+        stack_code[0]  <= 8'd0;
+        stack_depth[0] <= 4'd0;
     end
-    else if (state == S_DFS_RUN && sp != 0) begin
-        sp <= sp - 1'b1;
-        if (stack_node[sp-1] < IP_WIDTH) begin
-            code_table[stack_node[sp-1]] <= stack_code[sp-1];
-            code_len  [stack_node[sp-1]] <= sp - 1'b1;
+    else if (state == S_IDLE) begin
+        sp <= 0;
+    end 
+    else if (state == S_DFS_RUN && dfs_pop) begin
+        // update stack pointer
+        sp <= sp_next;
+
+        if (dfs_leaf) begin
+            // record Huffman code
+            code_table[cur_node] <= cur_code;
+            code_len  [cur_node] <= cur_depth;
         end
-        else begin
-            stack_node[sp]   <= node_l[stack_node[sp-1]];
-            stack_code[sp]   <= {stack_code[sp-1], 1'b0};
-            stack_node[sp+1] <= node_r[stack_node[sp-1]];
-            stack_code[sp+1] <= {stack_code[sp-1], 1'b1};
-            sp <= sp + 2'b10;
+        else if (dfs_push) begin
+            // push right child first (so left is processed first)
+            stack_node[sp-1]  <= node_r[cur_node];
+            stack_code[sp-1]  <= (cur_code << 1) | 1'b1;
+            stack_depth[sp-1] <= cur_depth + 1;
+
+            stack_node[sp]    <= node_l[cur_node];
+            stack_code[sp]    <= (cur_code << 1);
+            stack_depth[sp]   <= cur_depth + 1;
         end
     end
 end
 
-// ============================================================
-// Output preparation (ILOVE / ICLAB)
-// ============================================================
-reg [31:0] out_buf;
-reg [5:0]  out_len;
-reg [5:0]  out_idx;
-reg        out_done;
+// ============================================================================
+// Output
+// ============================================================================
+reg out_done;
+reg out_active;   
 
-localparam A = 0, B = 1, C = 2, E = 3, I = 4, L = 5, O = 6, V = 7;
+localparam IDX_A=0, IDX_B=1, IDX_C=2, IDX_E=3,
+           IDX_I=4, IDX_L=5, IDX_O=6, IDX_V=7;
+
+reg [2:0] out_char_idx;   // 0~4
+reg [3:0] out_bit_idx;
+
+reg [3:0] cur_len;
+reg [7:0] cur_code1;
+
+wire [2:0] char_sel [0:4];
+
+assign char_sel[0] = IDX_I;
+assign char_sel[1] = out_mode ? IDX_C : IDX_L;
+assign char_sel[2] = out_mode ? IDX_L : IDX_O;
+assign char_sel[3] = out_mode ? IDX_A : IDX_V;
+assign char_sel[4] = out_mode ? IDX_B : IDX_E;
+
+wire last_bit  = (out_bit_idx  == cur_len - 1);
+wire last_char = (out_char_idx == 3'd4);
+
 
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-        out_buf <= 32'b0;
-        out_len <= 6'b0;
+        out_valid    <= 1'b0;
+        out_active   <= 1'b0;
+        out_code     <= 1'b0;
+        out_done     <= 1'b0;
+        out_char_idx <= 3'd0;
+        out_bit_idx  <= 4'd0;
+        cur_len      <= 4'd0;
+        cur_code1    <= 8'd0;
     end
+    // --------------------------------------------------
+    // Prepare output
+    // --------------------------------------------------
     else if (state == S_PREP_OUT) begin
-        out_buf <= 32'b0;
-        out_len <= 6'b0;
-        if (!out_mode) begin
-            out_buf <= { code_table[I], code_table[L], code_table[O], code_table[V], code_table[E] };
-            out_len <= code_len[I] + code_len[L] + code_len[O] + code_len[V] + code_len[E];
+        out_char_idx <= 3'd0;
+        out_bit_idx  <= 4'd0;
+        cur_code1    <= code_table[char_sel[0]];
+        cur_len      <= code_len  [char_sel[0]];
+        out_active   <= 1'b1;   
+        out_valid    <= 1'b1;
+        out_done     <= 1'b0;
+    end
+    // --------------------------------------------------
+    // Output streaming
+    // --------------------------------------------------
+    else if (state == S_OUT && out_active) begin
+        out_code <= cur_code1[cur_len - 1 - out_bit_idx];
+
+        if (last_bit) begin
+            out_bit_idx <= 4'd0;
+
+            if (!last_char) begin
+    
+                out_char_idx <= out_char_idx + 1'b1;
+                cur_code1    <= code_table[char_sel[out_char_idx + 1'b1]];
+                cur_len      <= code_len  [char_sel[out_char_idx + 1'b1]];
+            end
+            else begin
+  
+                out_active <= 1'b0;  
+                out_done   <= 1'b1;
+            end
         end
         else begin
-            out_buf <= { code_table[I], code_table[C], code_table[L], code_table[A], code_table[B] };
-            out_len <= code_len[I] + code_len[C] + code_len[L] + code_len[A] + code_len[B];
+            out_bit_idx <= out_bit_idx + 1'b1;
         end
     end
-end
-
-// ============================================================
-// Serial output stage
-// ============================================================
-always @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
-        out_valid <= 1'b0;
-        out_code  <= 1'b0;
-        out_idx   <= 6'b0;
-        out_done  <= 1'b0;
-    end
-    else if (state == S_OUT) begin
-        out_valid <= 1'b1;
-        out_code  <= out_buf[out_len-1-out_idx];
-        out_idx   <= out_idx + 1'b1;
-        if (out_idx == out_len-1) begin
-            out_done  <= 1'b1;
-            out_valid <= 1'b0;
-        end
-    end
+    // --------------------------------------------------
+    // Default / idle
+    // --------------------------------------------------
     else begin
-        out_valid <= 1'b0;
-        out_idx   <= 6'b0;
+        out_valid <= out_active; // <<< ?”¯ä¸?ä¾†æ??
         out_done  <= 1'b0;
+        out_code <= 1'b0;
     end
 end
 
-endmodule
+
+
+endmodule    
+
+
+
+
