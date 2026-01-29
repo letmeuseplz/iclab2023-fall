@@ -1,1 +1,1 @@
-
+這個lab練習三個跨時鐘的資料傳輸問題  用到handshake synchronizer   asynchronize fifo  跨時領域中 會有亞穩態 (Metastability)情況，透過NDFF可以使取值穩定下來，一般插入兩級，但要依據是從塊到慢或是慢到快再評估。handshake相當於是mux syn概念 這裡用來處理取32bits seed跨時脈  而asyn fifo來處理多筆資料的傳輸
