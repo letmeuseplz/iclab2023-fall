@@ -1,0 +1,13 @@
+
+
+VCS=/usr/cad/synopsys/vcs/2022.06/amd64/bin/vcs
+
+# 將 CONVEX.v 改成你的 PRGN_TOP 檔名 (假設是 PRGN_TOP.v)
+# 將 tb.sv 改成你的 testbench.sv
+$VCS -sverilog testbench.sv prng.v \
+     -debug_acc+all \
+     +define+RTL \
+     +access+r \
+     -o simv
+
+./simv

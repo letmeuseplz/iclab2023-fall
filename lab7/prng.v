@@ -1,14 +1,135 @@
 `timescale 1ns/1ps
+
+
+module prng (
+    // Clock & Reset
+    input               clk1,
+    input               clk2,
+    input               clk3,
+    input               rst_n,
+    // Input signals
+    input               in_valid,
+    input      [31:0]   seed,
+    // Output signals
+    output wire         out_valid,
+    output wire [31:0]  rand_num
+);
+
+    // =====================================================
+    // Internal Wires
+    // =====================================================
+
+    // CLK_1 to Handshake
+    wire [31:0] hs_data_src;
+    wire        hs_valid_src;
+    wire        hs_done_src;  
+
+    // Handshake to CLK_2
+    wire [31:0] seed_data_dest;
+    wire        seed_fire_dest; 
+
+    // CLK_2 to FIFO
+    wire        wr_en;
+    wire [31:0] fifo_wr_data;
+    wire        fifo_full;
+
+    // FIFO to CLK_3
+    wire        fifo_rd_en;
+    wire [31:0] fifo_rd_data;
+    wire        fifo_empty;
+
+    // =====================================================
+    // Module Instantiations
+    // =====================================================
+
+    // --- Module 1: ?? Seed from pattern (CLK1) ---
+    CLK_1_MODULE u_clk1_mod (
+        .clk1     (clk1),
+        .rst_n    (rst_n),
+        .in_valid (in_valid),
+        .seed     (seed),
+        
+
+        .hs_valid (hs_valid_src), 
+        .hs_data  (hs_data_src),
+        .hs_done_src  (hs_done_src)   
+    );
+
+    handshake_sync #(.W(32)) u_handshake (
+ 
+        .sclk      (clk1),
+        .srst_n    (rst_n),
+        .src_valid (hs_valid_src), 
+        .src_data  (hs_data_src),  
+        .hs_done_src  (hs_done_src),  
+
+        // Destination Domain (CLK2)
+        .dclk      (clk2),
+        .drst_n    (rst_n),
+        .dst_fire  (seed_fire_dest),
+        .dst_data  (seed_data_dest) 
+    );
+
+   
+    CLK_2_MODULE u_clk2_mod (
+        .clk2         (clk2),
+        .rst_n        (rst_n),
+        
+     
+        .seed_fire    (seed_fire_dest),
+        .seed_data    (seed_data_dest),
+        
+     
+        .fifo_full    (fifo_full),
+        .wr_en        (wr_en),
+        .fifo_wr_data (fifo_wr_data)
+    );
+
+
+    async_fifo #(.ADDR_WIDTH(8), .DATA_WIDTH(32)) u_fifo (
+        // Write Domain (CLK2)
+        .wr_clk   (clk2),
+        .wr_rst_n (rst_n),
+        .wr_en    (wr_en),
+        .wr_data  (fifo_wr_data),
+        .full     (fifo_full),
+
+        // Read Domain (CLK3)
+        .rd_clk   (clk3),
+        .rd_rst_n (rst_n),
+        .rd_en    (fifo_rd_en),
+        .rd_data  (fifo_rd_data),
+        .empty    (fifo_empty)
+    );
+
+   
+    CLK_3_MODULE u_clk3_mod (
+        .clk3         (clk3),
+        .rst_n        (rst_n),
+        
+
+        .fifo_empty   (fifo_empty),
+        .fifo_rd_data (fifo_rd_data),
+        .fifo_rd_en   (fifo_rd_en),
+        
+      
+        .out_valid    (out_valid),
+        .rand_num     (rand_num)
+    );
+
+endmodule
+
+
 module CLK_1_MODULE (
     input              clk1,
     input              rst_n,
     input              in_valid,
     input       [31:0] seed,
 
-    // to handshake_sync
+    // to handshake_syn
     output reg         hs_valid,
     output reg  [31:0] hs_data,
-    input              hs_done
+    input              hs_done_src
 );
 
     reg busy;
@@ -19,14 +140,14 @@ module CLK_1_MODULE (
             hs_data  <= 32'd0;
             busy     <= 1'b0;
         end else begin
-            // Start handshake when valid input comes and not busy
+            
             if (in_valid && !busy) begin
                 hs_valid <= 1'b1;
                 hs_data  <= seed;
                 busy     <= 1'b1;
             end
-            // Finish handshake when done signal is received
-            else if (busy && hs_done) begin
+            
+            else if (busy && hs_done_src) begin
                 hs_valid <= 1'b0;
                 busy     <= 1'b0;
             end
@@ -41,7 +162,7 @@ module CLK_2_MODULE (
     input              rst_n,
 
     // from handshake_sync
-    input              seed_fire, // 接來自 Handshake 的 dst_fire
+    input              seed_fire, 
     input       [31:0] seed_data,
 
     // to FIFO_syn
@@ -71,11 +192,12 @@ module CLK_2_MODULE (
             wr_en        <= 1'b0;
             fifo_wr_data <= 32'd0;
         end else begin
-            wr_en <= 1'b0; 
+
 
             case (state)
                 WAIT_SEED: begin
                     if (seed_fire) begin
+                        wr_en <= 1'b0; 
                         rand_reg <= seed_data;
                         gen_cnt  <= 8'd0;
                         state    <= GEN;
@@ -93,6 +215,7 @@ module CLK_2_MODULE (
                             gen_cnt <= 8'd0;
                         end else begin
                             gen_cnt <= gen_cnt + 1'b1;
+                            state   <= GEN;
                         end
                     end
                 end
@@ -105,70 +228,74 @@ module CLK_3_MODULE (
     input               clk3,
     input               rst_n,
 
-    // From FIFO
+    // FIFO Interface
     input               fifo_empty,
     input      [31:0]   fifo_rd_data,
     output reg          fifo_rd_en,
 
-    // To PATTERN / Output
+    // To Output
     output reg          out_valid,
     output reg [31:0]   rand_num
 );
 
-    // =====================================================
-    // FSM states
-    // =====================================================
-    localparam S_IDLE    = 2'd0;
-    localparam S_RD_REQ  = 2'd1; // 發出讀取請求
-    localparam S_RD_DATA = 2'd2; // 接收資料 (FIFO Latency = 1)
-    localparam S_DONE    = 2'd3;
 
-    reg [1:0] state, next_state;
-    reg [7:0] out_cnt;   // 0~255
+    localparam S_IDLE = 2'd0;
+    localparam S_READ = 2'd1; 
+    localparam S_WAIT = 2'd2; 
+    localparam S_OUT  = 2'd3; 
+    localparam S_DONE = 3'd4; 
+
+    reg [2:0] state, next_state; 
+    reg [8:0] out_cnt; 
 
     // -------------------------
-    // State register
+    // State Register
     // -------------------------
     always @(posedge clk3 or negedge rst_n) begin
-        if (!rst_n)
-            state <= S_IDLE;
-        else
-            state <= next_state;
+        if (!rst_n) state <= S_IDLE;
+        else        state <= next_state;
     end
 
     // -------------------------
-    // Next-state logic
+    // Next-State Logic
     // -------------------------
     always @(*) begin
-        next_state = state;
         case (state)
             S_IDLE: begin
-                // 只有當 FIFO 有資料時才開始動作
-                if (!fifo_empty)
-                    next_state = S_RD_REQ;
+                if (!fifo_empty) next_state = S_READ;
+                else             next_state = S_IDLE;
             end
 
-            S_RD_REQ: begin
-                // 發出讀取請求後，下一 cycle 資料才會準備好
-                next_state = S_RD_DATA;
+            S_READ: begin
+                
+                next_state = S_WAIT;
             end
 
-            S_RD_DATA: begin
-                // 資料已讀取，判斷是否已滿 256筆
-                if (out_cnt == 8'd255)
+            S_WAIT: begin
+                
+                next_state = S_OUT;
+            end
+
+            S_OUT: begin
+                
+                if (out_cnt == 9'd255) begin
                     next_state = S_DONE;
-                else if (!fifo_empty) 
-                    // 如果還沒滿且 FIFO 還有資料，繼續讀下一筆
-                    next_state = S_RD_REQ;
-                else 
-                    // 如果還沒滿但 FIFO 空了，回到 IDLE 等待資料
-                    next_state = S_IDLE;
+                end 
+              
+                else if (!fifo_empty) begin
+                    next_state = S_READ; 
+                end 
+        
+                else begin
+                    next_state = S_IDLE; 
+                end
             end
 
             S_DONE: begin
-                // 完成任務，回到 IDLE (或停留在 DONE，視需求而定)
                 next_state = S_IDLE;
             end
+            
+            default: next_state = S_IDLE;
         endcase
     end
 
@@ -180,34 +307,37 @@ module CLK_3_MODULE (
             fifo_rd_en <= 1'b0;
             out_valid  <= 1'b0;
             rand_num   <= 32'd0;
-            out_cnt    <= 8'd0;
+            out_cnt    <= 9'd0;
         end else begin
-            
-            // Default values for pulses
-            out_valid  <= 1'b0; 
+   
             fifo_rd_en <= 1'b0;
+            out_valid  <= 1'b0; 
+            rand_num  <= 1'b0;
+            
 
             case (state)
                 S_IDLE: begin
-                    // 保持計數器 (如果是重跑則需在此歸零，視 Spec 而定)
-                    // 這裡假設回到 IDLE 不會清空計數器，除非是從 DONE 回來
-                    if (next_state == S_RD_REQ) begin
-                         // 預備動作
-                    end
+            
                 end
 
-                S_RD_REQ: begin
-                    fifo_rd_en <= 1'b1;   // Assert Read Enable
+                S_READ: begin
+                    fifo_rd_en <= 1'b1; 
                 end
 
-                S_RD_DATA: begin
-                    rand_num  <= fifo_rd_data; // Capture Data
-                    out_valid <= 1'b1;         // Output Valid Pulse
+                S_WAIT: begin
+                    fifo_rd_en <= 1'b0; 
+                   
+                end
+
+                S_OUT: begin
+              
+                    out_valid <= 1'b1;
+                    rand_num  <= fifo_rd_data;
                     out_cnt   <= out_cnt + 1'b1;
                 end
 
                 S_DONE: begin
-                    out_cnt <= 8'd0; // Reset counter for next batch
+                    out_cnt <= 9'd0;
                 end
             endcase
         end
@@ -215,123 +345,3 @@ module CLK_3_MODULE (
 
 endmodule
 
-module PRGN_TOP (
-    // Clock & Reset
-    input               clk1,
-    input               clk2,
-    input               clk3,
-    input               rst_n,
-    // Input signals
-    input               in_valid,
-    input      [31:0]   seed,
-    // Output signals
-    output wire         out_valid,
-    output wire [31:0]  rand_num
-);
-
-    // =====================================================
-    // Internal Wires
-    // =====================================================
-
-    // CLK_1 to Handshake
-    wire [31:0] hs_data_src;
-    wire        hs_valid_src;
-    wire        hs_done_src;  // [新增] 來自 Handshake 的完成訊號
-
-    // Handshake to CLK_2
-    wire [31:0] seed_data_dest;
-    wire        seed_fire_dest; // [新增] Handshake 輸出的 Pulse
-
-    // CLK_2 to FIFO
-    wire        wr_en;
-    wire [31:0] fifo_wr_data;
-    wire        fifo_full;
-
-    // FIFO to CLK_3
-    wire        fifo_rd_en;
-    wire [31:0] fifo_rd_data;
-    wire        fifo_empty;
-
-    // =====================================================
-    // Module Instantiations
-    // =====================================================
-
-    // --- Module 1: 接收 Seed (CLK1) ---
-    CLK_1_MODULE u_clk1_mod (
-        .clk1     (clk1),
-        .rst_n    (rst_n),
-        .in_valid (in_valid),
-        .seed     (seed),
-        
-        // 連接到 Handshake Source 端
-        .hs_valid (hs_valid_src), 
-        .hs_data  (hs_data_src),
-        .hs_done  (hs_done_src)   // [修正] 必須連接
-    );
-
-    // --- Handshake Synchronizer: clk1 -> clk2 ---
-    // 這裡的 Port 名稱必須對應之前定義的 handshake_sync 模組
-    handshake_sync #(.W(32)) u_handshake (
-        // Source Domain (CLK1)
-        .sclk      (clk1),
-        .srst_n    (rst_n),
-        .src_valid (hs_valid_src), // CLK1 發出的請求
-        .src_data  (hs_data_src),  // CLK1 發出的資料
-        .src_done  (hs_done_src),  // 回傳給 CLK1 的完成訊號 (ACK回來後)
-
-        // Destination Domain (CLK2)
-        .dclk      (clk2),
-        .drst_n    (rst_n),
-        .dst_fire  (seed_fire_dest), // 輸出給 CLK2 的 Pulse
-        .dst_data  (seed_data_dest)  // 輸出給 CLK2 的資料
-    );
-
-    // --- Module 2: Xorshift 運算 (CLK2) ---
-    CLK_2_MODULE u_clk2_mod (
-        .clk2         (clk2),
-        .rst_n        (rst_n),
-        
-        // 來自 Handshake 的輸出
-        .seed_fire    (seed_fire_dest),
-        .seed_data    (seed_data_dest),
-        
-        // FIFO 介面
-        .fifo_full    (fifo_full),
-        .wr_en        (wr_en),
-        .fifo_wr_data (fifo_wr_data)
-    );
-
-    // --- FIFO Synchronizer: clk2 -> clk3 ---
-    // DEPTH = 2^8 = 256
-    async_fifo #(.ADDR_WIDTH(8), .DATA_WIDTH(32)) u_fifo (
-        // Write Domain (CLK2)
-        .wr_clk   (clk2),
-        .wr_rst_n (rst_n),
-        .wr_en    (wr_en),
-        .wr_data  (fifo_wr_data),
-        .full     (fifo_full),
-
-        // Read Domain (CLK3)
-        .rd_clk   (clk3),
-        .rd_rst_n (rst_n),
-        .rd_en    (fifo_rd_en),
-        .rd_data  (fifo_rd_data),
-        .empty    (fifo_empty)
-    );
-
-    // --- Module 3: 輸出結果 (CLK3) ---
-    CLK_3_MODULE u_clk3_mod (
-        .clk3         (clk3),
-        .rst_n        (rst_n),
-        
-        // FIFO 介面
-        .fifo_empty   (fifo_empty),
-        .fifo_rd_data (fifo_rd_data),
-        .fifo_rd_en   (fifo_rd_en),
-        
-        // 最終輸出
-        .out_valid    (out_valid),
-        .rand_num     (rand_num)
-    );
-
-endmodule

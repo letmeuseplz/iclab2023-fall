@@ -1,17 +1,17 @@
 module handshake_sync #(
     parameter W = 32
 )(
-    // source domain (clk1)
+    // source domain 
     input              sclk,
     input              srst_n,
     input              src_valid,
     input  [W-1:0]     src_data,
-    output             src_done,
+    output            hs_done_src, //�蝯� MODULE 1 ��� done 靽∟��
 
-    // destination domain (clk2)
+    // destination domain 
     input              dclk,
     input              drst_n,
-    output reg         dst_fire,
+    output reg         dst_fire,   //�蝯危ODULE 2��� Pulse
     output reg [W-1:0] dst_data
 );
 
@@ -22,8 +22,8 @@ module handshake_sync #(
     reg dack;
     
     // Outputs from NDFF synchronizers
-    wire sreq_sync; // sreq synchronized to dclk domain
-    wire dack_sync; // dack synchronized to sclk domain
+    wire sreq_sync; 
+    wire dack_sync; 
 
     // --------------------------------------------------
     // NDFF Synchronizers
@@ -55,21 +55,20 @@ module handshake_sync #(
             sreq     <= 1'b0;
             src_busy <= 1'b0;
         end else begin
-            // [修正重點] 必須確認 dack_sync 為低 (Idle) 才能發起新請求
-            // 這是為了滿足 4-Phase Handshake 的安全性
+
             if (!src_busy && src_valid && !dack_sync) begin
                 sreq     <= 1'b1;
                 src_busy <= 1'b1;
             end
-            else if (src_busy && dack_sync) begin // Wait for ACK to assert
-                sreq     <= 1'b0; // De-assert Request
-                src_busy <= 1'b0; // Transaction Done
+            else if (src_busy && dack_sync) begin 
+                sreq     <= 1'b0; 
+                src_busy <= 1'b0; 
             end
         end
     end
 
-    // 當 busy 為高且收到 ACK 時，表示單次傳輸完成
-    assign src_done = src_busy && dack_sync;
+   
+    assign hs_done_src = src_busy && dack_sync;
 
     // --------------------------------------------------
     // Destination FSM (clk2)
@@ -83,16 +82,17 @@ module handshake_sync #(
             dst_data  <= {W{1'b0}};
             sreq_prev <= 1'b0;
         end else begin
-            dst_fire <= 1'b0; // Default pulse low
+            dst_fire <= 1'b0;  
             
-            // Rising edge detection on the synchronized request signal
+   
             if (sreq_sync && !sreq_prev) begin
                 dst_fire <= 1'b1;
-                dst_data <= src_data; // Capture Data
-                dack     <= 1'b1;     // Assert Acknowledge
+                dst_data <= src_data; 
+                dack     <= 1'b1;     
             end
             else if (!sreq_sync) begin
-                dack     <= 1'b0;     // Request dropped, drop Acknowledge
+                dack     <= 1'b0;
+                dst_data <= dst_data;     
             end
 
             sreq_prev <= sreq_sync;
