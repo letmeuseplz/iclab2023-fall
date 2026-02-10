@@ -8,7 +8,7 @@ module testbench;
 wire        clk;
 wire        rst_n;
 wire        in_valid;
-wire [4:0]  in_weight;
+wire [2:0]  in_weight;
 wire        out_mode;
 
 wire        out_valid;

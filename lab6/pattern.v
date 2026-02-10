@@ -5,7 +5,7 @@ module PATTERN(
     output reg        clk,
     output reg        rst_n,
     output reg        in_valid,
-    output reg [4:0]  in_weight,   // ¡¹ §ï¦¨ 5-bit
+    output reg [2:0]  in_weight,
     output reg        out_mode,
 
     input             out_valid,
@@ -35,6 +35,9 @@ integer mode_buf;
 //======================================
 reg [1023:0] golden;
 integer golden_len;
+
+// DUT output buffer
+reg [1023:0] dut_bits;
 integer out_cnt;
 
 //======================================
@@ -55,7 +58,7 @@ initial begin
     fgold = $fopen("golden.txt", "r");
 
     if (fin == 0 || fgold == 0) begin
-        $display("FILE OPEN ERROR");
+        $display("âŒ FILE OPEN ERROR");
         $finish;
     end
 
@@ -66,17 +69,17 @@ initial begin
         read_input_task;
         read_golden_task;
 
-        send_pattern_task;     // ¡¹ §ï¦¨³æ¤@ task
+        send_pattern_task;
         wait_out_valid_task;
         check_output_task;
 
-        $display("PASS pattern %0d, latency=%0d",
+        $display("âœ… PASS pattern %0d, latency=%0d",
                   pat_cnt, latency);
         pat_cnt = pat_cnt + 1;
     end
 
     $display("====================================");
-    $display("   ALL PATTERNS PASS");
+    $display("   ğŸ‰ ALL PATTERNS PASS");
     $display("====================================");
     $finish;
 end
@@ -105,7 +108,7 @@ end
 endtask
 
 //======================================
-// TASK: read golden (Vivado OK)
+// TASK: read golden
 //======================================
 task read_golden_task;
     integer c;
@@ -127,7 +130,7 @@ end
 endtask
 
 //======================================
-// TASK: send pattern (¡¹ DUT-aligned)
+// TASK: send pattern
 //======================================
 task send_pattern_task;
     integer i;
@@ -136,17 +139,15 @@ begin
 
     @(negedge clk);
     in_valid = 1'b1;
-    out_mode = mode_buf[0];    // ¡¹ mode ²Ä¤@©ç´Nµ¹
+    out_mode = mode_buf[0];
 
     for (i = 0; i < 8; i = i + 1) begin
-        in_weight = w[i][4:0];
+        in_weight = w[i][2:0];
         @(negedge clk);
     end
 
     in_valid  = 1'b0;
     in_weight = 'bx;
-
-    // ¡¹ out_mode «ùÄò«O«ù¡A¤£¯àÅÜ X
 end
 endtask
 
@@ -159,7 +160,7 @@ begin
     while (out_valid !== 1'b1) begin
         latency = latency + 1;
         if (latency > 2000) begin
-            $display("LATENCY FAIL");
+            $display("âŒ LATENCY FAIL");
             $finish;
         end
         @(negedge clk);
@@ -168,27 +169,72 @@ end
 endtask
 
 //======================================
-// TASK: check output
+// TASK: dump golden bits
+//======================================
+task dump_golden_task;
+    integer i;
+begin
+    $display("Golden bits (%0d):", golden_len);
+    $write("  ");
+    for (i = 0; i < golden_len; i = i + 1)
+        $write("%0d", golden[i]);
+    $write("\n");
+end
+endtask
+
+//======================================
+// TASK: dump DUT bits
+//======================================
+task dump_dut_task;
+    integer i;
+begin
+    $display("DUT bits (%0d):", out_cnt);
+    $write("  ");
+    for (i = 0; i < out_cnt; i = i + 1)
+        $write("%0d", dut_bits[i]);
+    $write("\n");
+end
+endtask
+
+//======================================
+// TASK: check output (FULL DEBUG)
 //======================================
 task check_output_task;
 begin
     out_cnt = 0;
+
     while (out_valid === 1'b1) begin
+        dut_bits[out_cnt] = out_code;
+
         if (out_code !== golden[out_cnt]) begin
-            $display("MISMATCH at bit %0d", out_cnt);
+            $display("====================================");
+            $display("âŒ OUTPUT MISMATCH");
+            $display("Pattern row   : %0d", pat_cnt);
+            $display("Bit index     : %0d", out_cnt);
+            $display("Expected bit  : %0d", golden[out_cnt]);
+            $display("Got bit       : %0d", out_code);
+            dump_golden_task;
+            dump_dut_task;
+            $display("====================================");
             $finish;
         end
+
         out_cnt = out_cnt + 1;
         @(negedge clk);
     end
 
     if (out_cnt !== golden_len) begin
-        $display("LENGTH ERROR exp=%0d got=%0d",
-                  golden_len, out_cnt);
+        $display("====================================");
+        $display("âŒ OUTPUT LENGTH ERROR");
+        $display("Pattern row   : %0d", pat_cnt);
+        $display("Expected len  : %0d", golden_len);
+        $display("Got len       : %0d", out_cnt);
+        dump_golden_task;
+        dump_dut_task;
+        $display("====================================");
         $finish;
     end
 
-    // ¡¹ output §¹¦¨«á¤~ÄÀ©ñ mode
     @(negedge clk);
     out_mode = 1'b0;
 end

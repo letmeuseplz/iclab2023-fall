@@ -4,17 +4,17 @@
 // ============================================================================
 module HT_TOP #(
     parameter IP_WIDTH = 8,
-    parameter W_W      = 5,
+    parameter W_W      = 7,
     parameter ID_W     = 4,
     parameter MAX_NODE = 15
 )(
     input  wire            clk,
     input  wire            rst_n,
     input  wire            in_valid,
-    input  wire [W_W-1:0]  in_weight,
+    input  wire [2:0]  in_weight,
     input  wire            out_mode,
     output reg             out_valid,
-    output reg             out_code
+    output reg           out_code
 );
 
 // ============================================================================
@@ -35,7 +35,7 @@ reg [3:0] state, next_state;
 // ============================================================================
 // Huffman nodes
 // ============================================================================
-reg [W_W-1:0]  node_w     [0:MAX_NODE-1];
+reg [W_W:0]  node_w     [0:MAX_NODE-1];
 reg            node_valid [0:MAX_NODE-1];
 reg [ID_W-1:0] node_l     [0:MAX_NODE-1];
 reg [ID_W-1:0] node_r     [0:MAX_NODE-1];
@@ -56,12 +56,15 @@ reg  [MAX_NODE*ID_W-1:0] si_char;
 reg  [MAX_NODE*W_W-1:0]  si_weight;
 wire [MAX_NODE*ID_W-1:0] so_char;
 
-// SORT_IP assumed to exist and produce sorted character indices
-SORT_IP #(.IP_WIDTH(MAX_NODE)) u_sort (
+SORT_IP #(
+    .IP_WIDTH (MAX_NODE),
+    .WEIGHT_W (W_W)
+) u_sort (
     .IN_character (si_char),
     .IN_weight    (si_weight),
     .OUT_character(so_char)
 );
+
 
 integer i;
 always @(*) begin
@@ -260,12 +263,13 @@ always @(posedge clk or negedge rst_n) begin
     end
 end
 
+
 // ============================================================================
 // Output
 // ============================================================================
 reg out_done;
 reg out_active;   
-
+reg start_valid;
 localparam IDX_A=0, IDX_B=1, IDX_C=2, IDX_E=3,
            IDX_I=4, IDX_L=5, IDX_O=6, IDX_V=7;
 
@@ -297,6 +301,7 @@ always @(posedge clk or negedge rst_n) begin
         out_bit_idx  <= 4'd0;
         cur_len      <= 4'd0;
         cur_code1    <= 8'd0;
+        start_valid    <= 1'b0;
     end
     // --------------------------------------------------
     // Prepare output
@@ -307,15 +312,18 @@ always @(posedge clk or negedge rst_n) begin
         cur_code1    <= code_table[char_sel[0]];
         cur_len      <= code_len  [char_sel[0]];
         out_active   <= 1'b1;   
-        out_valid    <= 1'b1;
+        start_valid    <= 1'b1;
         out_done     <= 1'b0;
     end
     // --------------------------------------------------
     // Output streaming
     // --------------------------------------------------
     else if (state == S_OUT && out_active) begin
+        
         out_code <= cur_code1[cur_len - 1 - out_bit_idx];
-
+        if (start_valid)begin
+            out_valid <= 1;
+            end
         if (last_bit) begin
             out_bit_idx <= 4'd0;
 
@@ -339,13 +347,12 @@ always @(posedge clk or negedge rst_n) begin
     // Default / idle
     // --------------------------------------------------
     else begin
-        out_valid <= out_active; // <<< ?”¯ä¸?ä¾†æ??
+        out_valid <= out_active; // <<< ??????????
         out_done  <= 1'b0;
         out_code <= 1'b0;
-    end
-end
-
-
+        start_valid    <= 1'b0;
+            end
+end      
 
 endmodule    
 
