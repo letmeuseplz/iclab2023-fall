@@ -1,0 +1,38 @@
+#!/bin/bash
+
+# 💡 養成好習慣：每次跑之前先清乾淨舊的編譯檔與波形，避免讀到舊資料
+rm -rf simv simv.daidir csrc ucli.key *.log *.fsdb
+
+# 指定 VCS 路徑
+VCS=/usr/cad/synopsys/vcs/2022.06/amd64/bin/vcs
+
+# 💡 檔案清單：換成這次的 SNN 相關檔案
+# (通常 TESTBED 裡面會自動 `include "PATTERN.v"，所以不用特別列出 PATTERN)
+FILES="../00_TESTBED/TESTBED.v \
+       SNN.v \
+       GATED_OR.v" 
+
+# 核心指令
+$VCS -sverilog \
+     -full64 \
+     $FILES \
+     -debug_acc+all \
+     +vcs+fsdbon \
+     +define+RTL \
+     +vcs+lic+wait \
+     -override_timescale=1ns/1ps \
+     +incdir+../00_TESTBED \
+     -y ./sim_ver +libext+.v \
+     -o simv | tee compile.log
+
+# 如果編譯成功就跑模擬
+if [ $? -eq 0 ]; then
+    echo "=========================================================="
+    echo "✅ 編譯成功 (Compiled Successfully)！開始執行模擬..."
+    echo "=========================================================="
+    ./simv | tee run.log
+else
+    echo "=========================================================="
+    echo "❌ 編譯失敗 (Compile Failed)！請檢查 compile.log 抓蟲。"
+    echo "=========================================================="
+fi

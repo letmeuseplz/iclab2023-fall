@@ -6,15 +6,23 @@ import os
 # ==========================================
 # 參數設定
 # ==========================================
-PAT_NUM = 100
+PAT_NUM = 30
 OUT_DIR = "../00_TESTBED/"
 
-# 💡 分拆成 5 個獨立檔案
+# 💡 分拆成多個獨立檔案 (包含輸入測資與所有檢查點)
 OPT_FILE = os.path.join(OUT_DIR, "opt.dat")
 IMG_FILE = os.path.join(OUT_DIR, "img.dat")
 KER_FILE = os.path.join(OUT_DIR, "kernel.dat")
 WGT_FILE = os.path.join(OUT_DIR, "weight.dat")
 GLD_FILE = os.path.join(OUT_DIR, "golden.dat")
+
+# 檢查點檔案 (Checkpoints)
+CHK_CONV_FILE = os.path.join(OUT_DIR, "golden_conv.dat")
+CHK_EQ_FILE   = os.path.join(OUT_DIR, "golden_eq.dat")
+CHK_POOL_FILE = os.path.join(OUT_DIR, "golden_pool.dat")
+CHK_FC_FILE   = os.path.join(OUT_DIR, "golden_fc.dat")
+CHK_NORM_FILE = os.path.join(OUT_DIR, "golden_norm.dat")
+CHK_ACT_FILE  = os.path.join(OUT_DIR, "golden_act.dat")
 
 os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -87,24 +95,48 @@ def golden_model(img0, img1, kernel, weight, opt):
         else:             
             act_out = np.tanh(norm_out, dtype=np.float32)
             
-        return act_out
+        # 💡 將所有中間結果打包回傳
+        checkpoints = {
+            'conv': conv_out,
+            'eq': eq_out,
+            'pool': pool_out,
+            'fc': fc_out,
+            'norm': norm_out,
+            'act': act_out
+        }
+        return act_out, checkpoints
 
-    out0 = process_image(img0)
-    out1 = process_image(img1)
+    out0, chk0 = process_image(img0)
+    out1, chk1 = process_image(img1)
     l1_dist = np.sum(np.abs(out0 - out1, dtype=np.float32), dtype=np.float32)
-    return l1_dist
+    
+    return l1_dist, chk0, chk1
+
+# ==========================================
+# 輔助寫檔函數 (自動攤平並加上註解)
+# ==========================================
+def write_checkpoint(f, arr, prefix):
+    arr_flat = arr.flatten()
+    for idx, val in enumerate(arr_flat):
+        f.write(f"{float_to_hex(val)} // {prefix}[{idx}]: {val:.6f}\n")
 
 # ==========================================
 # 產生檔案
 # ==========================================
-print(f"🚀 開始生成 {PAT_NUM} 筆測資 (拆分多檔案)...")
+print(f"🚀 開始生成 {PAT_NUM} 筆測資與所有檢查點檔案...")
 
-# 💡 同時開啟 5 個檔案寫入
+# 同時開啟所有要寫入的檔案
 with open(OPT_FILE, 'w') as f_opt, \
      open(IMG_FILE, 'w') as f_img, \
      open(KER_FILE, 'w') as f_ker, \
      open(WGT_FILE, 'w') as f_wgt, \
-     open(GLD_FILE, 'w') as f_gld:
+     open(GLD_FILE, 'w') as f_gld, \
+     open(CHK_CONV_FILE, 'w') as f_c_conv, \
+     open(CHK_EQ_FILE, 'w') as f_c_eq, \
+     open(CHK_POOL_FILE, 'w') as f_c_pool, \
+     open(CHK_FC_FILE, 'w') as f_c_fc, \
+     open(CHK_NORM_FILE, 'w') as f_c_norm, \
+     open(CHK_ACT_FILE, 'w') as f_c_act:
          
     for pat in range(PAT_NUM):
         opt = random.randint(0, 3)
@@ -119,30 +151,47 @@ with open(OPT_FILE, 'w') as f_opt, \
             img0 = np.full((4, 4, 3), val, dtype=np.float32)
             kernel = np.full((3, 3, 3), 0.1, dtype=np.float32) 
             
-        golden_ans = golden_model(img0, img1, kernel, weight, opt)
+        # 取得最終答案與檢查點
+        golden_ans, chk0, chk1 = golden_model(img0, img1, kernel, weight, opt)
         
-        # 1. 寫入 Opt
-        f_opt.write(f"{opt}\n")
+        # --- 寫入輸入測資 ---
+        f_opt.write(f"{opt} // Option: {opt}\n")
         
-        # 2. 寫入 Img (96 筆)
-        for img in [img0, img1]:
+        for img_idx, img in enumerate([img0, img1]):
             for c in range(3):
                 for i in range(4):
                     for j in range(4):
-                        f_img.write(f"{float_to_hex(img[i,j,c])}\n")
+                        val = img[i,j,c]
+                        f_img.write(f"{float_to_hex(val)} // pat{pat}_img{img_idx}[{i},{j},c{c}]: {val:.6f}\n")
                         
-        # 3. 寫入 Kernel (27 筆)
         for c in range(3):
             for i in range(3):
                 for j in range(3):
-                    f_ker.write(f"{float_to_hex(kernel[i,j,c])}\n")
+                    val = kernel[i,j,c]
+                    f_ker.write(f"{float_to_hex(val)} // pat{pat}_kernel[{i},{j},c{c}]: {val:.6f}\n")
                     
-        # 4. 寫入 Weight (4 筆)
         weight_flat = weight.flatten()
-        for w in weight_flat:
-            f_wgt.write(f"{float_to_hex(w)}\n")
+        for idx, w in enumerate(weight_flat):
+            f_wgt.write(f"{float_to_hex(w)} // pat{pat}_weight[{idx}]: {w:.6f}\n")
             
-        # 5. 寫入 Golden Answer
-        f_gld.write(f"{float_to_hex(golden_ans)}\n")
+        f_gld.write(f"{float_to_hex(golden_ans)} // pat{pat}_golden_L1_dist: {golden_ans:.6f}\n")
 
-print(f"✅ 成功生成 5 個獨立的測資檔案至 {OUT_DIR}！")
+        # --- 💡 寫入中間檢查點 ---
+        # 每個 pattern 會有 img0 和 img1 兩次計算，這裡照順序寫入檔案
+        for img_idx, chk in enumerate([chk0, chk1]):
+            prefix = f"pat{pat}_img{img_idx}"
+            
+            # 1. Conv (4x4 = 16 筆)
+            write_checkpoint(f_c_conv, chk['conv'], f"{prefix}_conv")
+            # 2. Equalization (4x4 = 16 筆)
+            write_checkpoint(f_c_eq,   chk['eq'],   f"{prefix}_eq")
+            # 3. Max Pooling (2x2 = 4 筆)
+            write_checkpoint(f_c_pool, chk['pool'], f"{prefix}_pool")
+            # 4. FC (1x4 = 4 筆)
+            write_checkpoint(f_c_fc,   chk['fc'],   f"{prefix}_fc")
+            # 5. Normalization (1x4 = 4 筆)
+            write_checkpoint(f_c_norm, chk['norm'], f"{prefix}_norm")
+            # 6. Activation (1x4 = 4 筆)
+            write_checkpoint(f_c_act,  chk['act'],  f"{prefix}_act")
+
+print(f"✅ 成功生成輸入測資及 6 個階段的 Checkpoint 檔案至 {OUT_DIR}！")

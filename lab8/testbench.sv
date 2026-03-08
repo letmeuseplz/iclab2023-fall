@@ -69,14 +69,14 @@ module TESTBED;
         `ifdef RTL
             // 跑 RTL Simulation 時的波形檔
             $fsdbDumpfile("SNN.fsdb");
-            $fsdbDumpvars(0, "+mda"); // 加上 +mda 可以把二維陣列/SRAM也倒出來看
-            $fsdbDumpvars();
+            $fsdbDumpvars(0, TESTBED); // 💡 明確告訴它：從 TESTBED 這一層開始，往下所有的線都抓！
+            $fsdbDumpMDA(10, TESTBED); // 💡 專門用來抓二維陣列 (img_buf, feat_buf 等)
         `elsif GATE
             // 跑 Gate-level Simulation 時的波形檔與 SDF 標註
             $fsdbDumpfile("SNN_GATE.fsdb");
             $sdf_annotate("Netlist/SNN_SYN.sdf", I_SNN);
-            $fsdbDumpvars(0, "+mda");
-            $fsdbDumpvars();
+            $fsdbDumpvars(0, TESTBED);
+            $fsdbDumpMDA(10, TESTBED);
         `endif
     end
 

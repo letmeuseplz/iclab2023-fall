@@ -1,100 +1,30 @@
-3d9cbef0
-3fae7396
-3e3bda84
-3c4afac0
-3eb27082
-3edf954d
-3c8351c0
-3d2f752e
-3e056a2a
-3e8d9f96
-3d5a4f30
-3e03df70
-3d18dfa6
-3cb84927
-3dc68b20
-3ccdffa4
-3ee3f41c
-3e09ef3b
-3e0956e0
-3dd2099c
-3ef0706b
-3e05de14
-3e9531d4
-3d42b8f0
-3ccd34a2
-3eea1042
-3ec96906
-3cb42700
-3c9d7ac0
-3c996ac0
-3c37f1c0
-3e5b5f3a
-3f08e3f6
-3c617200
-3ec43278
-3ddbca90
-3ec68640
-3d306670
-3cb18100
-3e9ad13f
-3dc87840
-3c20be80
-3dac9db6
-3d4f0720
-3fa494a5
-3dd56508
-3ee4d15e
-3c823360
-3db62658
-3b921a7d
-3c306be6
-3e074a2b
-3e01a3a0
-3eb3be2e
-3dc5a808
-3d42f6c0
-3e72e024
-3d5f83d8
-3beb5400
-3c448c00
-3dbfaa00
-3d4c625e
-3e0ae528
-3d59c9e0
-3b5929bc
-3eb9e852
-3cd45c00
-3e156992
-3e59e053
-3d3de392
-3e6618b4
-3e1492c4
-3d4dd7d0
-3c60ee36
-3da9c7c8
-3c83e0a0
-3b97bb00
-3ddd6458
-3e081002
-3f240457
-3d52f6d0
-3d821740
-3cec1e20
-3e827a9a
-3cdff1c0
-3d69ace0
-3eda1dd9
-3e273f62
-3d7f75c0
-3d301a70
-3d1950d0
-3d9f667e
-3d77d700
-3d89d5ce
-3e83a8da
-3f17b3e2
-3d338d70
-3e8df335
-3e507c60
-3ba9a100
+3f3576f4 // pat0_golden_L1_dist: 0.708846
+3d2af797 // pat1_golden_L1_dist: 0.041740
+3eb290ab // pat2_golden_L1_dist: 0.348760
+3f575b96 // pat3_golden_L1_dist: 0.841241
+3d7b89cd // pat4_golden_L1_dist: 0.061411
+3e495264 // pat5_golden_L1_dist: 0.196603
+3ed7f0ba // pat6_golden_L1_dist: 0.421758
+3dbbb2c2 // pat7_golden_L1_dist: 0.091650
+3e92820d // pat8_golden_L1_dist: 0.286148
+3d0836d0 // pat9_golden_L1_dist: 0.033255
+3bb2a000 // pat10_golden_L1_dist: 0.005451
+3e35eb9c // pat11_golden_L1_dist: 0.177657
+3f235453 // pat12_golden_L1_dist: 0.638005
+3e1a5964 // pat13_golden_L1_dist: 0.150732
+3e23c021 // pat14_golden_L1_dist: 0.159913
+3d487108 // pat15_golden_L1_dist: 0.048936
+3d7868f0 // pat16_golden_L1_dist: 0.060647
+3d9ab3be // pat17_golden_L1_dist: 0.075538
+3e29f2e1 // pat18_golden_L1_dist: 0.165966
+3f6189df // pat19_golden_L1_dist: 0.881010
+3dadabd0 // pat20_golden_L1_dist: 0.084800
+3c303880 // pat21_golden_L1_dist: 0.010756
+3baa5d00 // pat22_golden_L1_dist: 0.005199
+3d6074e0 // pat23_golden_L1_dist: 0.054799
+3d131b63 // pat24_golden_L1_dist: 0.035915
+3f04d92c // pat25_golden_L1_dist: 0.518939
+3e822b9c // pat26_golden_L1_dist: 0.254239
+3c8ea400 // pat27_golden_L1_dist: 0.017412
+3c031480 // pat28_golden_L1_dist: 0.008000
+3e17053e // pat29_golden_L1_dist: 0.147481

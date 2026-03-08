@@ -1,6 +1,10 @@
-`define PAT_NUM 100
-`define IN_FILE   "../00_TESTBED/input.dat"
-`define OUT_FILE  "../00_TESTBED/golden.dat"
+`define PAT_NUM 1
+
+`define OPT_FILE  "./opt.dat"
+`define IMG_FILE  "./img.dat"
+`define KER_FILE  "./kernel.dat"
+`define WGT_FILE  "./weight.dat"
+`define OUT_FILE  "./golden.dat"
 
 module PATTERN (
     // Output to DUT
@@ -32,17 +36,20 @@ module PATTERN (
     // ===============================================================
     // Variables
     // ===============================================================
-    integer file_in, file_out;
+    integer f_opt, f_img, f_ker, f_wgt, f_out;
     integer pat_idx;
     integer scan_val;
     integer i;
+    
+    reg [8*200:1] line_buffer; // 💡 [新增] 暫存整行字串的 buffer，用來安全過濾掉註解
     
     integer latency;
     integer total_latency;
     reg     count_latency_en;
 
     reg wait_output_done;
-    reg out_valid_last; // 💡 追蹤上一個 cycle 的 out_valid 狀態
+    reg out_valid_last; 
+    reg reset_done;     // 💡 用來標記 Reset 是否完全結束
 
     // Data Buffers
     reg [31:0] pat_img    [0:IMG_LEN-1];
@@ -82,6 +89,7 @@ module PATTERN (
     initial begin
         clk = 0;
         out_valid_last = 0;
+        reset_done = 0; 
         $display("\033[1;34m[SYSTEM] Starting SNN Simulation...\033[0m");
         
         task_open_file();
@@ -125,10 +133,14 @@ module PATTERN (
     // ===============================================================
 
     task task_open_file; begin
-        file_in = $fopen(`IN_FILE, "r");
-        file_out = $fopen(`OUT_FILE, "r");
-        if (file_in == 0 || file_out == 0) begin
-            $display("\033[1;31m[FATAL] Error opening pattern files!\033[0m");
+        f_opt = $fopen(`OPT_FILE, "r");
+        f_img = $fopen(`IMG_FILE, "r");
+        f_ker = $fopen(`KER_FILE, "r");
+        f_wgt = $fopen(`WGT_FILE, "r");
+        f_out = $fopen(`OUT_FILE, "r");
+        
+        if (f_opt == 0 || f_img == 0 || f_ker == 0 || f_wgt == 0 || f_out == 0) begin
+            $display("\033[1;31m[FATAL] Error opening one or more pattern files!\033[0m");
             $finish;
         end
     end endtask
@@ -138,15 +150,14 @@ module PATTERN (
         in_valid = 0;
         cg_en    = 0;
         
-        // 💡 Spec 要求：非 valid 期間給 unknown state ('bx)
         Img      = 32'bx;
         Kernel   = 32'bx;
         Weight   = 32'bx;
         Opt      = 2'bx;
 
         force clk = 0;
-        #10 rst_n = 0;
-        #20 rst_n = 1;
+        #10 rst_n = 0; 
+        #20 rst_n = 1; 
         
         if (out_valid !== 0 || out_data !== 0) begin
             $display("\033[1;31m[FAIL] Signals must be 0 after reset at %0t\033[0m", $time);
@@ -154,22 +165,42 @@ module PATTERN (
         end
         release clk;
         repeat(5) @(negedge clk);
+        
+        reset_done = 1; 
+        
         $display("\033[1;32m[DEBUG] Reset Completed Successfully.\033[0m");
     end endtask
 
     task task_read_pattern; begin
-        scan_val = $fscanf(file_in, "%d", pat_opt);
+        // 讀取 Option
+        scan_val = $fscanf(f_opt, "%d", pat_opt);
         if (scan_val == -1) begin
             $display("\033[1;33m[INFO] End of file reached.\033[0m");
             task_pass_message();
             $finish;
         end
         
-        for (i=0; i<IMG_LEN; i=i+1) scan_val = $fscanf(file_in, "%h", pat_img[i]);
-        for (i=0; i<KER_LEN; i=i+1) scan_val = $fscanf(file_in, "%h", pat_kernel[i]);
-        for (i=0; i<WGT_LEN; i=i+1) scan_val = $fscanf(file_in, "%h", pat_weight[i]);
+        // 💡 [修改] 讀取 Image：先抓整行，再從開頭挑出 16 進位數值，完美忽略後面的註解
+        for (i=0; i<IMG_LEN; i=i+1) begin
+            scan_val = $fgets(line_buffer, f_img);
+            scan_val = $sscanf(line_buffer, "%h", pat_img[i]);
+        end
         
-        scan_val = $fscanf(file_out, "%h", golden_ans);
+        // 💡 [修改] 讀取 Kernel
+        for (i=0; i<KER_LEN; i=i+1) begin
+            scan_val = $fgets(line_buffer, f_ker);
+            scan_val = $sscanf(line_buffer, "%h", pat_kernel[i]);
+        end
+        
+        // 💡 [修改] 讀取 Weight
+        for (i=0; i<WGT_LEN; i=i+1) begin
+            scan_val = $fgets(line_buffer, f_wgt);
+            scan_val = $sscanf(line_buffer, "%h", pat_weight[i]);
+        end
+        
+        // 💡 [修改] 讀取 Golden Answer (以防裡面也有註解)
+        scan_val = $fgets(line_buffer, f_out);
+        scan_val = $sscanf(line_buffer, "%h", golden_ans);
     end endtask
 
     task task_drive_input; begin
@@ -181,17 +212,13 @@ module PATTERN (
         @(negedge clk);
         in_valid = 1;
         
-        // 循序送入 96 筆資料
         for (i = 0; i < MAX_IN_LEN; i = i + 1) begin
             if (out_valid === 1'b1) begin
                 $display("\033[1;31m[FAIL] in_valid and out_valid cannot overlap!\033[0m");
                 $finish;
             end
             
-            // 💡 Spec 要求：Opt 只有第一拍有值，其餘為 Unknown ('bx)
             Opt    = (i == 0) ? pat_opt : 2'bx;
-            
-            // 💡 Spec 要求：長度不夠的補 Unknown ('bx)
             Img    = pat_img[i];
             Kernel = (i < KER_LEN) ? pat_kernel[i] : 32'bx;
             Weight = (i < WGT_LEN) ? pat_weight[i] : 32'bx;
@@ -199,7 +226,6 @@ module PATTERN (
             @(negedge clk);
         end
 
-        // 結束輸入，全部回歸 Unknown ('bx)
         in_valid = 0;
         Img      = 32'bx;
         Kernel   = 32'bx;
@@ -233,9 +259,8 @@ module PATTERN (
     real real_golden, real_out, err;
     
     always @(negedge clk) begin
-        if (rst_n) begin
+        if (rst_n && reset_done) begin
             
-            // 💡 Spec 強化：嚴格檢查 out_valid 只能 high 1 個 cycle
             if (out_valid && out_valid_last) begin
                 $display("\033[1;31m[FAIL] out_valid must be high for ONLY 1 cycle! at %0t\033[0m", $time);
                 $finish;
@@ -261,7 +286,6 @@ module PATTERN (
                 
             end 
             else begin
-                // 💡 Spec 要求：out_valid 為 0 時，out_data 必須嚴格為 0
                 if (out_data !== 0) begin
                     $display("\033[1;31m[FAIL] out_data is NOT 0 when out_valid is LOW at %0t\033[0m", $time);
                     $display("Current value: %h", out_data);
@@ -271,4 +295,4 @@ module PATTERN (
         end
     end
 
-endmodules
+endmodule

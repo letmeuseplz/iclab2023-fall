@@ -7,7 +7,7 @@ module SNN #(
     parameter SIG_W   = 23,
     parameter EXP_W   = 8,
    
-    parameter PIPE_LAT = 7
+    parameter PIPE_LAT = 4
 )(
     input                   clk,
     input                   rst_n,
@@ -55,7 +55,7 @@ module SNN #(
     reg [6:0] recv_count; // 0..95 global count of Img inputs received
   
     reg [6:0] ker_ptr;
-    reg [1:0] wt_ptr;
+    reg [2:0] wt_ptr;
   
     reg [1:0]  opt_reg;
 
@@ -78,11 +78,13 @@ module SNN #(
 
     integer k;
     reg  gflag1, gflag0;
-    reg idx_hist[0:7];
-    reg img_hist[0:7];
-    reg valid_hist[0:7];
+    reg [3:0] idx_hist[0:6];
+    reg img_hist[0:6];
+    reg valid_hist[0:6];
+    reg [7:0] cnt_img0;
+    reg [7:0] cnt_img1;
     assign gflag_all = (cnt_img0 == 48)& (cnt_img1 == 48);
-    reg cnt_img0,cnt_img1;
+    
     reg [1:0] ch_hist [0:PIPE_LAT-1];
     integer m;
 
@@ -95,7 +97,7 @@ module SNN #(
     reg  actv_done;
     reg  sum_ch;
     reg [DATA_W-1:0] a01_reg, a23_reg, a45_reg, a67_reg;
-    reg [7:0]flatten[0:7];
+    reg [DATA_W-1:0]flatten[0:7];
     reg [3:0] fc_cnt;
     // -------------------------
     // Pooling cintrol signals
@@ -126,8 +128,8 @@ module SNN #(
     wire [DATA_W-1:0] shared_div_z;
     reg [DATA_W-1:0] act_a1, act_b1, act_a2, act_b2;
     reg [DATA_W-1:0] cmp_a0_r, cmp_b0_r, cmp_a1_r, cmp_b1_r;
-        // comparator signals
-    wire [DATA_W-1:0] cmp_a0, cmp_b0, cmp_a1, cmp_b1;
+    wire[DATA_W-1:0] cmp_a0_w, cmp_b0_w, cmp_a1_w, cmp_b1_w;
+ 
     wire cmp0_gt, cmp1_gt, cmp0_unord, cmp1_unord;
     // -------------------------
     // NORMALIZED CONTROL SIGNALS
@@ -177,45 +179,46 @@ module SNN #(
     wire do_sub = (elem_idx < NUM_ELEM_PER_IMG);
     wire is_last = (elem_idx == NUM_ELEM_PER_IMG+1);
     wire do_store = (elem_idx > 1);
-
+    wire equal_done = (state == ST_EQUAL) && (cnt_img0 == 16) && (cnt_img1 == 16);
     // =========================================================
     // Clock Gating Cells 
     // =========================================================
   
-    wire sleep_add = cg_en && !(state == ST_FC || state == ST_RUN || state == ST_EQUAL || state == ST_ACTV || state == ST_OUT);
+// 💡 確保在加法運算、輸出答案，或是接收新測資時，Clock 都有在跳動
+    wire sleep_add = cg_en && !(state == ST_FC || state == ST_RUN || state == ST_EQUAL || state == ST_ACTV || state == ST_OUT || in_valid || out_valid);
     wire clk_add;
     GATED_OR GATED_ADD (.CLOCK(clk), .SLEEP_CTRL(sleep_add), .RST_N(rst_n), .CLOCK_GATED(clk_add));
 
- 
-    wire sleep_mult = cg_en && !(state == ST_RUN || state == ST_EQUAL || state == ST_FC);
+    wire sleep_mult = cg_en && !(state == ST_RUN || state == ST_EQUAL || state == ST_FC || in_valid || out_valid);
     wire clk_mult;
     GATED_OR GATED_MULT (.CLOCK(clk), .SLEEP_CTRL(sleep_mult), .RST_N(rst_n), .CLOCK_GATED(clk_mult));
 
-    wire sleep_feat = cg_en && !(state == ST_RUN || state == ST_EQUAL);
+    // 💡 兇手在這裡！加上 in_valid 和 out_valid，讓 feat_buf 可以在換題時順利起床洗澡！
+    wire sleep_feat = cg_en && !(state == ST_RUN || state == ST_EQUAL || in_valid || out_valid);
     wire clk_feat;
     GATED_OR GATED_FEAT (.CLOCK(clk), .SLEEP_CTRL(sleep_feat), .RST_N(rst_n), .CLOCK_GATED(clk_feat));
 
-     wire sleep_pool    = cg_en && !(state == ST_POOL || pool_done);
+    wire sleep_pool    = cg_en && !(state == ST_POOL || pool_done || in_valid || out_valid);
     wire clk_pool;
     GATED_OR GATED_POOL (.CLOCK(clk), .SLEEP_CTRL(sleep_pool), .RST_N(rst_n), .CLOCK_GATED(clk_pool));
 
-    wire sleep_flatten = cg_en && !(state == ST_FC || state == ST_ACTV);
+    wire sleep_flatten = cg_en && !(state == ST_FC || state == ST_ACTV || in_valid || out_valid);
     wire clk_flatten;
     GATED_OR GATED_FLATTEN (.CLOCK(clk), .SLEEP_CTRL(sleep_flatten), .RST_N(rst_n), .CLOCK_GATED(clk_flatten));
 
-    wire sleep_fc_ctrl = cg_en && !(state == ST_FC || fc_done);
+    wire sleep_fc_ctrl = cg_en && !(state == ST_FC || fc_done || in_valid || out_valid);
     wire clk_fc;
     GATED_OR GATED_FC_CTRL (.CLOCK(clk), .SLEEP_CTRL(sleep_fc_ctrl), .RST_N(rst_n), .CLOCK_GATED(clk_fc));
 
-    wire sleep_norm    = cg_en && !(state == ST_NORM || norm_done);
+    wire sleep_norm    = cg_en && !(state == ST_NORM || norm_done || in_valid || out_valid);
     wire clk_norm;
     GATED_OR GATED_NORM (.CLOCK(clk), .SLEEP_CTRL(sleep_norm), .RST_N(rst_n), .CLOCK_GATED(clk_norm));
 
-    wire sleep_actv    = cg_en && !(state == ST_ACTV || actv_done);
+    wire sleep_actv    = cg_en && !(state == ST_ACTV || actv_done || in_valid || out_valid);
     wire clk_actv;
     GATED_OR GATED_ACTV (.CLOCK(clk), .SLEEP_CTRL(sleep_actv), .RST_N(rst_n), .CLOCK_GATED(clk_actv));
 
-    wire sleep_out     = cg_en && !(state == ST_OUT || out_valid);
+    wire sleep_out     = cg_en && !(state == ST_OUT || out_valid || in_valid);
     wire clk_out;
     GATED_OR GATED_OUT (.CLOCK(clk), .SLEEP_CTRL(sleep_out), .RST_N(rst_n), .CLOCK_GATED(clk_out));
     // -------------------------
@@ -257,7 +260,7 @@ module SNN #(
         end
     end
 
-    // Input reception: write incoming Img/Kernels/Weights into buffers
+   // Input reception: write incoming Img/Kernels/Weights into buffers
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             recv_count <= 0;
@@ -265,12 +268,17 @@ module SNN #(
             wt_ptr <= 0;
             opt_reg <= 2'b00;
 
-        end else begin
-            // latch opt on first valid if desired
-            if ( in_valid) begin
+        end 
+        else if(out_valid) begin
+            recv_count <= 0;
+            ker_ptr <= 0;
+            wt_ptr <= 0;
+            end
+        else begin
+            if (in_valid) begin
                 if (recv_count == 0) 
                     opt_reg <= Opt;
-                // write image into img_buf contiguously: recv_count 0..95
+            
                 if (recv_count < IMG_BUF_SZ) begin
                     img_buf[recv_count] <= Img;
                     recv_count <= recv_count + 1;
@@ -290,6 +298,7 @@ module SNN #(
                 end
             end
         end
+
     end
 
 
@@ -344,7 +353,9 @@ module SNN #(
     integer rr, cc, r, c;
     integer rr_cl, cc_cl;
     
-   
+   wire [15:0] base_addr = (state == ST_RUN) ? 
+                            (conv_img * IMG_MEM_SZ + (conv_ch * CELLS_PER_IMG)) : // ST_RUN 讀 3 通道原圖
+                            (conv_img * CELLS_PER_IMG);
     integer ch_offset;
 
     always @(*) begin
@@ -360,7 +371,7 @@ module SNN #(
             center_c = conv_pos[1:0];
 
          
-            ch_offset = (state == ST_RUN) ? (conv_ch * CELLS_PER_IMG) : 0;
+           
 
             for (p=0; p<9; p=p+1) begin
                 case (p)
@@ -387,12 +398,12 @@ module SNN #(
                         cc_cl = (c < 0) ? 0 : ((c >= IMG_W) ? IMG_W-1 : c);
                         win_pad_flag_next[p] = 1'b0;
                        
-                        win_addr_next[p] = conv_img * IMG_MEM_SZ + ch_offset + rr_cl * IMG_W + cc_cl;
+                       win_addr_next[p] = base_addr + rr_cl * IMG_W + cc_cl;
                     end
                 end else begin
                     win_pad_flag_next[p] = 1'b0;
                     
-                    win_addr_next[p] = conv_img * IMG_MEM_SZ + ch_offset + r * IMG_W + c;
+                    win_addr_next[p] = base_addr + r * IMG_W + c;
                 end
             end
         end
@@ -434,9 +445,10 @@ module SNN #(
     wire [DATA_W-1:0] a0123, a4567, tmp_all, sum_shared;
     wire [DATA_W-1:0] acc_in_feat; 
     wire [DATA_W-1:0] acc_out;     
-    
-   
-    assign acc_in_feat = feat_buf[idx_hist[PIPE_LAT-1] + (img_hist[PIPE_LAT-1] << 4)];
+    reg [DATA_W-1:0] equal_buf [0:FEAT_SZ-1];
+    wire[4:0] feat_idx = idx_hist[PIPE_LAT-1] + (img_hist[PIPE_LAT-1] << 4);
+    wire [4:0] equal_idx = idx_hist[PIPE_LAT-1] + (img_hist[PIPE_LAT-1] << 4);
+    assign acc_in_feat = feat_buf[feat_idx];
 
     //-----------------------------------------------------
     //
@@ -467,10 +479,10 @@ module SNN #(
     //-----------------------------------------------------
     //
     //-----------------------------------------------------
-    DW_fp_add #(SIG_W, EXP_W, 0) add0123(.a(a01_reg), .b(a23_reg), .rnd(3'b000), .z(a0123));
-    DW_fp_add #(SIG_W, EXP_W, 0) add4567(.a(a45_reg), .b(a67_reg), .rnd(3'b000), .z(a4567));
-    DW_fp_add #(SIG_W, EXP_W, 0) add_all(.a(a0123), .b(a4567), .rnd(3'b000), .z(tmp_all));
-    DW_fp_add #(SIG_W, EXP_W, 0) add_final(.a(tmp_all), .b(add_final_b_reg), .rnd(3'b000), .z(sum_shared));
+    DW_fp_add #(SIG_W, EXP_W, 0) add0123(.a(a01_reg), .b(a23_reg), .rnd(3'b000), .z(a0123),.status());
+    DW_fp_add #(SIG_W, EXP_W, 0) add4567(.a(a45_reg), .b(a67_reg), .rnd(3'b000), .z(a4567),.status());
+    DW_fp_add #(SIG_W, EXP_W, 0) add_all(.a(a0123), .b(a4567), .rnd(3'b000), .z(tmp_all),.status());
+    DW_fp_add #(SIG_W, EXP_W, 0) add_final(.a(tmp_all), .b(add_final_b_reg), .rnd(3'b000), .z(sum_shared),.status());
    
  
 
@@ -510,7 +522,7 @@ module SNN #(
                         else
                             mult_a_reg[p] <= img_buf[win_addr_reg[p]];
 
-                        mult_b_reg[p] <= ker_buf[p + (img_hist[PIPE_LAT-1] * 9)];
+                        mult_b_reg[p] <= ker_buf[p + (ch_hist[0] * 9)];
                     end
                 end
 
@@ -647,8 +659,8 @@ module SNN #(
         end
     end
 
-    // ==========================================
-    //
+   // ==========================================
+    // 管線歷史紀錄與影像計數器
     // ==========================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -661,6 +673,16 @@ module SNN #(
             cnt_img1 <= 0;
             gflag0   <= 0;
             gflag1   <= 0;
+        end
+        // 💡 修正處：在 IDLE 狀態準備迎接新測資時，將計數器與有效訊號洗乾淨
+        else if (out_valid) begin 
+            cnt_img0 <= 0;
+            cnt_img1 <= 0;
+            gflag0   <= 0;
+            gflag1   <= 0;
+            for (k = 0; k < PIPE_LAT; k = k + 1) begin
+                valid_hist[k] <= 0; // 順便清掉 valid 歷史，避免誤寫入
+            end
         end
         else if (state == ST_RUN && cnt_img0 == 48 && cnt_img1 == 48) begin
             cnt_img0 <= 0;
@@ -694,7 +716,6 @@ module SNN #(
                 end
             end
             else if (state == ST_EQUAL) begin
-               
                 if (valid_hist[PIPE_LAT-2]) begin
                     if (img_hist[PIPE_LAT-2] == 1'b0) begin
                         if (cnt_img0 < 16) cnt_img0 <= cnt_img0 + 1;
@@ -706,26 +727,47 @@ module SNN #(
         end
     end
 
-    // ==========================================
-    
-    // ==========================================
+    // ===============================================================
+    // 1. Feature Buffer: 專門存 ST_RUN 算出來的原始卷積結果 (acc_out)
+    // ===============================================================
     always @(posedge clk_feat or negedge rst_n) begin
         if (!rst_n) begin
             for (i = 0; i < FEAT_SZ; i = i + 1) begin
                 feat_buf[i] <= {DATA_W{1'b0}};
             end
         end
+        // 💡 修正：在吐出答案的那 1 拍 (out_valid == 1) 順便洗乾淨
+        // 此時你的 sleep_feat 剛好會讓 clk_feat 醒著，清零才能成功！
+        else if (out_valid) begin
+            for (i = 0; i < FEAT_SZ; i = i + 1) begin
+                feat_buf[i] <= {DATA_W{1'b0}};
+            end
+        end
         else begin
             if (state == ST_RUN && valid_hist[PIPE_LAT-1]) begin
-                feat_buf[idx_hist[PIPE_LAT-1] + (img_hist[PIPE_LAT-1] << 4)] <= acc_out;
-            end
-            else if (state == ST_EQUAL && valid_hist[PIPE_LAT-2]) begin
-                feat_buf[idx_hist[PIPE_LAT-2] + (img_hist[PIPE_LAT-2] << 4)] <= prod_reg[0];
+                feat_buf[feat_idx] <= acc_out;
             end
         end
     end
 
-    wire equal_done = (state == ST_EQUAL) && (cnt_img0 == 16) && (cnt_img1 == 16);
+
+    // ===============================================================
+    // 2. Equal Buffer: 專門存 ST_EQUAL 算完 1/9 的結果 (prod_reg[0])
+    // ===============================================================
+ 
+    always @(posedge clk_feat or negedge rst_n) begin
+        if (!rst_n) begin
+            for (i = 0; i < FEAT_SZ; i = i + 1) begin
+                equal_buf[i] <= {DATA_W{1'b0}};
+            end
+        end
+        else begin
+          
+            if (state == ST_EQUAL && valid_hist[PIPE_LAT-1]) begin
+                equal_buf[equal_idx] <= prod_reg[0];
+            end
+        end
+    end
     // ---------------------------------------------------------
     // COMPARATOR INPUT ROUTING (With Global Power Gating)
     // ---------------------------------------------------------
@@ -735,25 +777,25 @@ module SNN #(
     assign cmp_a0_w = 
         (!cmp_en) ? {DATA_W{1'b0}} : 
         (state == ST_NORM) ? cmp_a0_r :
-        (pool_stage < 3'd4) ? feat_buf[pool_base + idx_ul] : 
+        (pool_stage < 3'd4) ? equal_buf[pool_base + idx_ul] : 
                             max_top[pool_stage - 3'd4];
 
     assign cmp_b0_w = 
         (!cmp_en) ? {DATA_W{1'b0}} :
         (state == ST_NORM) ? cmp_b0_r :
-        (pool_stage < 3'd4) ? feat_buf[pool_base + idx_ur] : 
+        (pool_stage < 3'd4) ? equal_buf[pool_base + idx_ur] : 
                             max_bot[pool_stage - 3'd4];
 
     assign cmp_a1_w = 
         (!cmp_en) ? {DATA_W{1'b0}} :
         (state == ST_NORM) ? cmp_a1_r :
-        (pool_stage < 3'd4) ? feat_buf[pool_base + idx_dl] : 
+        (pool_stage < 3'd4) ? equal_buf[pool_base + idx_dl] : 
                             {DATA_W{1'b0}};
 
     assign cmp_b1_w = 
         (!cmp_en) ? {DATA_W{1'b0}} :
         (state == ST_NORM) ? cmp_b1_r :
-        (pool_stage < 3'd4) ? feat_buf[pool_base + idx_dr] : 
+        (pool_stage < 3'd4) ? equal_buf[pool_base + idx_dr] : 
                             {DATA_W{1'b0}};
 
 
@@ -762,8 +804,8 @@ module SNN #(
 
     // =============================================================
     // Two-comparator 2x2 max pooling (for two 4x4 feature maps)
-    // feat_buf[0:15]  = image 0
-    // feat_buf[16:31] = image 1
+    // equal_buf[0:15]  = image 0
+    // equal_buf[16:31] = image 1
     // =============================================================
 
 
@@ -815,11 +857,14 @@ module SNN #(
 
     reg [DATA_W-1:0] norm_div_a, norm_div_b;
     reg [DATA_W-1:0] actv_div_a, actv_div_b;
-  
+    wire[DATA_W-1:0] shared_div_a,shared_div_b;
     assign shared_div_a = (state == ST_NORM) ? norm_div_a : actv_div_a;
     assign shared_div_b = (state == ST_NORM) ? norm_div_b : actv_div_b;
 
 
+   // ==========================================
+    // Max Pooling 控制邏輯
+    // ==========================================
     always @(posedge clk_pool or negedge rst_n) begin
         if (!rst_n) begin
             pool_stage <= 3'd0;
@@ -856,19 +901,41 @@ module SNN #(
                 default: pool_stage <= 3'd0;
             endcase
         end
-       
         else begin
             pool_stage <= 3'd0;
             pool_done  <= 1'b0;
+            pool_round <= 1'b0; 
         end
     end
-
     
 
     
     //-----------------------------------------------------
     // Flatten output buffer (合併兩輪 FC 結果)
     //-----------------------------------------------------
+
+     
+    localparam  ACTV_S_IDLE        = 3'd0,
+                ACTV_S_EXP_START   = 3'd1,
+                ACTV_S_EXP_WAIT    = 3'd2,
+                ACTV_S_INV_LATCH   = 3'd3,
+                ACTV_S_POSTINV_PRE = 3'd4,
+                ACTV_S_FINAL_PREP  = 3'd5,
+                ACTV_S_DONE        = 3'd6;
+
+    localparam  NORM_S_SET01    = 4'd0,
+                NORM_S_WAIT01   = 4'd1,
+                NORM_S_PREP23   = 4'd2,
+                NORM_S_WAIT23   = 4'd3,
+                NORM_S_DENOM_SUB= 4'd4,
+                NORM_S_WAIT_DEN = 4'd5,
+                NORM_S_PIPE     = 4'd6,
+                NORM_S_DONE     = 4'd7;     
+
+
+
+
+
     always @(posedge clk_flatten or negedge rst_n) begin
         if (!rst_n) begin
             for (p=0; p<8; p=p+1)
@@ -939,8 +1006,15 @@ module SNN #(
     //-----------------------------------------------------
     //  NORMALIZE INSTANCES
     //---------------------------------------------------
-  
+
+
+    wire [DATA_W-1:0] abs_out = {1'b0, shared_sub_z[DATA_W-2:0]};
+
+    wire sub_en = (state == ST_ACTV) || (state == ST_NORM) || (state == ST_OUT);
     
+    reg [DATA_W-1:0] sub_in_a_out, sub_in_b_out;
+        
+    wire [DATA_W-1:0] shared_sub_a, shared_sub_b;
     assign shared_sub_a = (!sub_en)          ? {DATA_W{1'b0}} :
                           (state == ST_ACTV) ? sub_in_a       : 
                           (state == ST_NORM) ? sub_in_al1     :
@@ -961,7 +1035,7 @@ module SNN #(
         .status()              
     );
    
-    DW_fp_div #(SIG_W, EXP_W, 0, 0, 0) U8 ( 
+    DW_fp_div #(SIG_W, EXP_W, 0) U8 ( 
         .a(shared_div_a), 
         .b(shared_div_b), 
         .rnd(3'b000),          
@@ -971,16 +1045,6 @@ module SNN #(
 
     reg [DATA_W-1:0] normalized [0:2*NUM_ELEM_PER_IMG-1];
 
-
-
-    localparam NORM_S_SET01    = 4'd0,
-            NORM_S_WAIT01   = 4'd1,
-            NORM_S_PREP23   = 4'd2,
-            NORM_S_WAIT23   = 4'd3,
-            NORM_S_DENOM_SUB= 4'd4,
-            NORM_S_WAIT_DEN = 4'd5,
-            NORM_S_PIPE     = 4'd6,
-            NORM_S_DONE     = 4'd7;
 
     always @(posedge clk_norm or negedge rst_n) begin
         if (!rst_n) begin
@@ -1022,7 +1086,7 @@ module SNN #(
                     norm_s <= NORM_S_WAIT_DEN;
                 end
                 NORM_S_WAIT_DEN: begin
-                    denom_reg <= shared_sub_z; elem_idx <= 0; sub_reg <= 0;
+                    denom_reg <= shared_sub_z; elem_idx <= 0; 
                     norm_s <= NORM_S_PIPE;
                 end
                 NORM_S_PIPE: begin
@@ -1058,22 +1122,20 @@ module SNN #(
         else begin
             norm_s <= NORM_S_SET01;
             norm_done <= 1'b0;
+ 
+            norm_img_idx <= 0; // 💡 補上：確保下一題從第 0 張圖開始
+            elem_idx <= 0;     // 💡 補上：確保下一題從第 0 個像素開始
         end
+        
     end
 
-        // -------------------------
-        // Activation FSM (per-element over 8 elements) sequencing shared units
-        // Steps per element (sigmoid): exp(x) -> inv_exp = 1/exp -> denom = 1 + inv_exp -> out = 1/denom
-        // Steps per element (tanh): exp(x) -> inv_exp = 1/exp -> num = exp - inv_exp -> den = exp + inv_exp -> out = num/den
-        // We'll sequence safely using shared_div and shared_sub only when needed, with explicit WAIT states.
-        // -------------------------
-    localparam  ACTV_S_IDLE        = 3'd0,
-                ACTV_S_EXP_START   = 3'd1,
-                ACTV_S_EXP_WAIT    = 3'd2,
-                ACTV_S_INV_LATCH   = 3'd3,
-                ACTV_S_POSTINV_PRE = 3'd4,
-                ACTV_S_FINAL_PREP  = 3'd5,
-                ACTV_S_DONE        = 3'd6;
+    // -------------------------
+    // Activation FSM (per-element over 8 elements) sequencing shared units
+    // Steps per element (sigmoid): exp(x) -> inv_exp = 1/exp -> denom = 1 + inv_exp -> out = 1/denom
+    // Steps per element (tanh): exp(x) -> inv_exp = 1/exp -> num = exp - inv_exp -> den = exp + inv_exp -> out = num/den
+    // We'll sequence safely using shared_div and shared_sub only when needed, with explicit WAIT states.
+    // -------------------------
+
 
     DW_fp_exp #(SIG_W, EXP_W, 0, 0) U9 (
         .a(actv_tmp1),
@@ -1133,12 +1195,7 @@ module SNN #(
     // L1 distance stage 
     // =========================================================
 
-    wire [DATA_W-1:0] abs_out = {1'b0, shared_sub_z[DATA_W-2:0]};
-
-    wire sub_en = (state == ST_ACTV) || (state == ST_NORM) || (state == ST_OUT);
-    
-    reg [DATA_W-1:0] sub_in_a_out, sub_in_b_out;
-    
+   
 
     always @(posedge clk_out or negedge rst_n) begin
         if (!rst_n) begin
