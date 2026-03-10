@@ -1,8 +1,5 @@
-2025/11/27 test the pattern 本lab意在完成SNN的架構 使用單一Buffer存取image的input
-
-
-2025/12/05 大致完成 
-1.在設計上假設所有ip都是組合邏輯(except the dw_exp)  
+請參考lab8 lowpower design 這個lab 沒有用到clock gating 也沒equalisation 剩餘整體邏輯雷同 但此版本在pipeline 管控上並沒有做好 在連續加法邏輯中間並沒有安插 會導致時序過長 很有可能會爆掉 
+1.在設計上假設所有ip都是組合邏輯(except the dw_exp) 因此當前週期就會得到結果
 2.使用單一buffer來存取總共96個輸入 為了避免時序過長  在第16個點輸入之後開始做convolution
 3.在convolution部分插入pipeline避免組合邏輯運算過長
 4.conv,fc,act l1中共用加法器
