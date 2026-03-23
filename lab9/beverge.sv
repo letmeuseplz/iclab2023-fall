@@ -137,27 +137,25 @@ logic [9:0] vol;
 assign vol = (size_reg == 2'b00) ? 10'd960 : 
              (size_reg == 2'b01) ? 10'd720 : 10'd480;
 
-// --- 飲料配方計算 ---
-logic [9:0] req_bt, req_gt, req_m, req_p;
+
+logic [9:0] req_bt, req_gt, req_m, req_p;   //配方
 always_comb begin
-    // 預設為 0，防止 Latch
+    
     req_bt = 0; req_gt = 0; req_m = 0; req_p = 0;
     
-    // 利用位移運算取代乘除法 (>> 1 = /2,  >> 2 = /4)
+    
     case (type_reg)
-        3'd0: req_bt = vol;                                        // Black Tea (1)
-        3'd1: begin req_bt = (vol>>2)*3; req_m = (vol>>2);   end   // Milk Tea (3:1)
-        3'd2: begin req_bt = (vol>>1);   req_m = (vol>>1);   end   // Extra Milk Tea (1:1)
-        3'd3: req_gt = vol;                                        // Green Tea (1)
-        3'd4: begin req_gt = (vol>>1);   req_m = (vol>>1);   end   // Green Milk Tea (1:1)
-        3'd5: req_p  = vol;                                        // Pineapple Juice (1)
-        3'd6: begin req_bt = (vol>>1);   req_p = (vol>>1);   end   // Super Pine Tea (1:1)
-        3'd7: begin req_bt = (vol>>1); req_m = (vol>>2); req_p = (vol>>2); end // Pine Milk (2:1:1)
+        3'd0: req_bt = vol;                                           // total 960, 720, 480 按比例
+        3'd1: begin req_bt = (vol>>2)*3; req_m = (vol>>2);   end   
+        3'd3: req_gt = vol;                                        
+        3'd4: begin req_gt = (vol>>1);   req_m = (vol>>1);   end   
+        3'd5: req_p  = vol;                                        
+        3'd6: begin req_bt = (vol>>1);   req_p = (vol>>1);   end   
+        3'd7: begin req_bt = (vol>>1); req_m = (vol>>2); req_p = (vol>>2); end 
     endcase
 end
 
-// --- 庫存扣除 (Make Drink) ---
-// 宣告為 13-bit signed，這樣減出來如果變負數，最高位元 [12] 就會變成 1
+// d=00 檢困存
 logic signed [12:0] rem_bt, rem_gt, rem_m, rem_p;
 assign rem_bt = {1'b0, d_bt} - {3'b0, req_bt};
 assign rem_gt = {1'b0, d_gt} - {3'b0, req_gt};
@@ -165,7 +163,7 @@ assign rem_m  = {1'b0, d_m}  - {3'b0, req_m};
 assign rem_p  = {1'b0, d_p}  - {3'b0, req_p};
 
 logic is_short;
-// 只要有任何一個原料扣完變負數 (MSB == 1)，就代表庫存不足
+
 assign is_short = rem_bt[12] | rem_gt[12] | rem_m[12] | rem_p[12];
 
 // --- 庫存增加 (Supply) ---
@@ -176,9 +174,12 @@ assign add_gt = {1'b0, d_gt} + {1'b0, sup_gt};
 assign add_m  = {1'b0, d_m}  + {1'b0, sup_m};
 assign add_p  = {1'b0, d_p}  + {1'b0, sup_p};
 
+
+
 logic is_of;
-// 如果加起來大於 4095，觸發溢位錯誤
-assign is_of = (add_bt > 4095) | (add_gt > 4095) | (add_m > 4095) | (add_p > 4095);
+assign is_of = add_bt[12] | add_gt[12] | add_m[12] | add_p[12];
+
+
 
 
 // ============================================================================
@@ -192,12 +193,12 @@ always_ff @(posedge clk or negedge rst_n) begin
         wdata_reg     <= 64'd0;
     end else begin
         
-        // 抓取 DRAM 回傳庫存
+        
         if (state == ST_READ_WAIT && C_out_valid) begin
             dram_data_reg <= C_data_r;
         end
         
-        // 在 ST_CALC 週期進行所有運算結果的採樣 (Sampling)
+       
         if (state == ST_CALC) begin
             case (action_reg)
                 
@@ -216,7 +217,7 @@ always_ff @(posedge clk or negedge rst_n) begin
                     else begin
                         err_reg  <= 2'b00; // No_Err
                         comp_reg <= 1'b1;
-                        // 更新剩餘庫存，日期沿用原本的 (d_exp_m, d_exp_d)
+                  
                         wdata_reg <= {rem_bt[11:0], rem_gt[11:0], d_exp_m, 
                                       rem_m[11:0], rem_p[11:0], d_exp_d};
                     end
@@ -226,19 +227,19 @@ always_ff @(posedge clk or negedge rst_n) begin
                 // Supply (補貨)
                 // ------------------------------------
                 2'b01: begin 
-                    err_reg  <= is_of ? 2'b11 : 2'b00; // 判斷是否溢位 Ing_OF
-                    comp_reg <= !is_of;                // 沒溢位才算 Complete
-                    
-                    // 把新庫存寫入，超過 4095 則鎖在 4095。並且將日期「更新」為本次輸入的 month_reg 與 day_reg
-                    wdata_reg <= {
-                        (add_bt > 4095) ? 12'd4095 : add_bt[11:0], 
-                        (add_gt > 4095) ? 12'd4095 : add_gt[11:0],
-                        {4'b0, month_reg}, 
-                        (add_m > 4095) ? 12'd4095 : add_m[11:0],
-                        (add_p > 4095) ? 12'd4095 : add_p[11:0], 
-                        {3'b0, day_reg}
-                    };
-                end
+                        err_reg  <= is_of ? 2'b11 : 2'b00; 
+                        comp_reg <= !is_of;                
+                        
+                       
+                        wdata_reg <= {
+                            add_bt[12] ? 12'd4095 : add_bt[11:0], 
+                            add_gt[12] ? 12'd4095 : add_gt[11:0],
+                            {4'b0, month_reg}, 
+                            add_m[12]  ? 12'd4095 : add_m[11:0],
+                            add_p[12]  ? 12'd4095 : add_p[11:0], 
+                            {3'b0, day_reg}
+                        };
+                    end
                 
                 // ------------------------------------
                 // Check Date (檢查日期)
