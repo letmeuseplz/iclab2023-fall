@@ -9,3 +9,6 @@ The handshake synchronizer functions similarly to a MUX-based synchronizer. In t
 
 3. Asynchronous FIFO
 For scenarios involving the transfer of multiple data packets (burst data), I implemented an Asynchronous FIFO. This approach manages the pointer synchronization using Gray codes to prevent errors, effectively handling the throughput difference between the disparate clock domains.
+
+spyglass note:
+spyglass cdc verify有兩個warning 一個是看不懂gray code長相 解決方法要嘛是waive 不然就是constraint告訴是gray  另外一個是reset在same domain觸發兩次 在async中 有個腳位是接到reset 結果被誤認為是做reset 實務上是gray code addr
